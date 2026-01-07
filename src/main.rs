@@ -19,6 +19,7 @@ use std::{error::Error, io, time::Duration};
 struct MyRect {
     x: f64,
     y: f64,
+    z: f64,
     width: f64,
     height: f64,
 }
@@ -88,14 +89,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .x_bounds([0.0, area.width as f64])
                 .y_bounds([0.0, area.height as f64])
                 .paint(|ctx| {
+                    let top_selected_z = app
+                        .rects
+                        .iter()
+                        .filter(|r| r.contains(app.dot_x, app.dot_y))
+                        .map(|r| r.z)
+                        .fold(f64::NEG_INFINITY, f64::max);
+
                     for r in &app.rects {
-                        let is_hit = r.contains(app.dot_x, app.dot_y);
+                        let is_selected = (r.z - top_selected_z).abs() < f64::EPSILON;
                         ctx.draw(&Rectangle {
                             x: r.x,
                             y: r.y,
                             width: r.width,
                             height: r.height,
-                            color: if is_hit { Color::Red } else { Color::White },
+                            color: if is_selected {
+                                Color::Red
+                            } else {
+                                Color::White
+                            },
                         });
                     }
 
@@ -172,6 +184,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let new_rect = MyRect {
                                 x: app.start_x.unwrap().min(app.dot_x),
                                 y: app.start_y.unwrap().min(app.dot_y),
+                                z: app.rects.len() as f64,
                                 width: (app.dot_x - app.start_x.unwrap()).abs(),
                                 height: (app.dot_y - app.start_y.unwrap()).abs(),
                             };
