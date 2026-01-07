@@ -10,8 +10,12 @@ use ratatui::{
     widgets::canvas::{Canvas, Rectangle},
     widgets::{Block, Borders},
 };
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::{error::Error, io, time::Duration};
 
+#[derive(Serialize, Deserialize, Clone)]
 struct MyRect {
     x: f64,
     y: f64,
@@ -39,6 +43,24 @@ impl App {
             rects: Vec::new(),
         }
     }
+
+    fn save_to_file(&self) -> Result<(), Box<dyn Error>> {
+        let json = serde_json::to_string(&self.rects)?; // 类似 JSON.stringify
+        let mut file = File::create("rects.json")?;
+        file.write_all(json.as_bytes())?;
+        Ok(())
+    }
+
+    fn load_from_file() -> Vec<MyRect> {
+        if let Ok(mut file) = File::open("rects.json") {
+            let mut contents = String::new();
+            if file.read_to_string(&mut contents).is_ok() {
+                // 类似 JSON.parse，如果解析失败则返回空数组
+                return serde_json::from_str(&contents).unwrap_or_else(|_| Vec::new());
+            }
+        }
+        Vec::new()
+    }
 }
 
 impl MyRect {
@@ -55,6 +77,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
+    app.rects = App::load_from_file();
 
     loop {
         terminal.draw(|f| {
@@ -98,7 +121,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
                     match key.code {
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') => {
+                            app.save_to_file()?;
+                            break;
+                        }
                         KeyCode::Char('z') | KeyCode::Char('Z') => {
                             app.rects.pop();
                         }
