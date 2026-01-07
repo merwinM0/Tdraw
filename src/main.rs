@@ -41,6 +41,12 @@ impl App {
     }
 }
 
+impl MyRect {
+    fn contains(&self, px: f64, py: f64) -> bool {
+        px >= self.x && px <= (self.x + self.width) && py >= self.y && py <= (self.y + self.height)
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -60,12 +66,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .y_bounds([0.0, area.height as f64])
                 .paint(|ctx| {
                     for r in &app.rects {
+                        let is_hit = r.contains(app.dot_x, app.dot_y);
                         ctx.draw(&Rectangle {
                             x: r.x,
                             y: r.y,
                             width: r.width,
                             height: r.height,
-                            color: Color::White,
+                            color: if is_hit { Color::Red } else { Color::White },
                         });
                     }
 
