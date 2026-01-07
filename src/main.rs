@@ -99,6 +99,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     match key.code {
                         KeyCode::Char('q') => break,
+                        KeyCode::Char('z') | KeyCode::Char('Z') => {
+                            app.rects.pop();
+                        }
+
+                        KeyCode::Char('c') | KeyCode::Char('C') => {
+                            app.rects.clear();
+                        }
 
                         KeyCode::Up
                         | KeyCode::Down
