@@ -31,6 +31,7 @@ struct App {
     start_x: Option<f64>,
     start_y: Option<f64>,
     rects: Vec<MyRect>,
+    selected_idx: Option<usize>,
 }
 
 impl App {
@@ -42,6 +43,7 @@ impl App {
             start_x: None,
             start_y: None,
             rects: Vec::new(),
+            selected_idx: None,
         }
     }
 
@@ -175,23 +177,66 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         }
 
-                        KeyCode::Char('w') => app.dot_y += 1.0,
-                        KeyCode::Char('s') => app.dot_y -= 1.0,
-                        KeyCode::Char('a') => app.dot_x -= 2.0,
-                        KeyCode::Char('d') => app.dot_x += 2.0,
+                        // 修改后的 WASD 逻辑
+                        KeyCode::Char('w') | KeyCode::Char('W') => {
+                            app.dot_y += 1.0;
+                            // 如果抓取了矩形，跟着动
+                            if let Some(idx) = app.selected_idx {
+                                app.rects[idx].y += 1.0;
+                            }
+                        }
+                        KeyCode::Char('s') | KeyCode::Char('S') => {
+                            app.dot_y -= 1.0;
+                            if let Some(idx) = app.selected_idx {
+                                app.rects[idx].y -= 1.0;
+                            }
+                        }
+                        KeyCode::Char('a') | KeyCode::Char('A') => {
+                            app.dot_x -= 2.0;
+                            if let Some(idx) = app.selected_idx {
+                                app.rects[idx].x -= 2.0;
+                            }
+                        }
+                        KeyCode::Char('d') | KeyCode::Char('D') => {
+                            app.dot_x += 2.0;
+                            if let Some(idx) = app.selected_idx {
+                                app.rects[idx].x += 2.0;
+                            }
+                        }
 
-                        KeyCode::Enter if app.is_drawing => {
-                            let new_rect = MyRect {
-                                x: app.start_x.unwrap().min(app.dot_x),
-                                y: app.start_y.unwrap().min(app.dot_y),
-                                z: app.rects.len() as f64,
-                                width: (app.dot_x - app.start_x.unwrap()).abs(),
-                                height: (app.dot_y - app.start_y.unwrap()).abs(),
-                            };
-                            app.rects.push(new_rect);
-                            app.is_drawing = false;
-                            app.start_x = None;
-                            app.start_y = None;
+                        // 修改后的 Enter 逻辑
+                        KeyCode::Enter => {
+                            if app.is_drawing {
+                                // 模式 A: 完成画框逻辑
+                                let new_rect = MyRect {
+                                    x: app.start_x.unwrap().min(app.dot_x),
+                                    y: app.start_y.unwrap().min(app.dot_y),
+                                    z: app.rects.len() as f64,
+                                    width: (app.dot_x - app.start_x.unwrap()).abs(),
+                                    height: (app.dot_y - app.start_y.unwrap()).abs(),
+                                };
+                                app.rects.push(new_rect);
+                                app.is_drawing = false;
+                                app.start_x = None;
+                                app.start_y = None;
+                            } else if app.selected_idx.is_some() {
+                                // 模式 B: 正在抓取中，按下 Enter 放开矩形
+                                app.selected_idx = None;
+                            } else {
+                                // 模式 C: 尝试抓取圆点下的最高层矩形
+                                let top_z = app
+                                    .rects
+                                    .iter()
+                                    .filter(|r| r.contains(app.dot_x, app.dot_y))
+                                    .map(|r| r.z)
+                                    .fold(f64::NEG_INFINITY, f64::max);
+
+                                // 找到那个 Z 值最大的矩形索引
+                                app.selected_idx = app.rects.iter().position(|r| {
+                                    (r.z - top_z).abs() < f64::EPSILON
+                                        && r.contains(app.dot_x, app.dot_y)
+                                });
+                            }
                         }
                         _ => {}
                     }
