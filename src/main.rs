@@ -86,8 +86,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         terminal.draw(|f| {
             let area = f.area();
 
+            let background_block = Block::default()
+                .style(ratatui::style::Style::default().bg(Color::Rgb(255, 255, 255)));
+            f.render_widget(background_block, area);
+
             let canvas = Canvas::default()
-                .block(Block::default().title("Tdraw").borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title("Tdraw")
+                        .borders(Borders::ALL)
+                        .border_style(ratatui::style::Style::default().fg(Color::Black))
+                        .title_style(ratatui::style::Style::default().fg(Color::Black)),
+                )
+                .background_color(Color::Rgb(255, 255, 255))
                 .x_bounds([0.0, area.width as f64])
                 .y_bounds([0.0, area.height as f64])
                 .paint(|ctx| {
@@ -108,7 +119,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             color: if is_selected {
                                 Color::Red
                             } else {
-                                Color::White
+                                Color::Black
                             },
                         });
                     }
@@ -119,11 +130,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                             y: sy.min(app.dot_y),
                             width: (app.dot_x - sx).abs(),
                             height: (app.dot_y - sy).abs(),
-                            color: Color::Yellow,
+                            color: Color::Blue,
                         });
                     }
-
-                    ctx.print(app.dot_x, app.dot_y, "●");
+                    ctx.print(
+                        app.dot_x,
+                        app.dot_y,
+                        ratatui::text::Span::styled(
+                            "●",
+                            ratatui::style::Style::default().fg(Color::Black),
+                        ),
+                    );
                 });
 
             f.render_widget(canvas, area);
@@ -180,7 +197,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // 修改后的 WASD 逻辑
                         KeyCode::Char('w') | KeyCode::Char('W') => {
                             app.dot_y += 1.0;
-                            // 如果抓取了矩形，跟着动
                             if let Some(idx) = app.selected_idx {
                                 app.rects[idx].y += 1.0;
                             }
@@ -207,7 +223,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                         // 修改后的 Enter 逻辑
                         KeyCode::Enter => {
                             if app.is_drawing {
-                                // 模式 A: 完成画框逻辑
                                 let new_rect = MyRect {
                                     x: app.start_x.unwrap().min(app.dot_x),
                                     y: app.start_y.unwrap().min(app.dot_y),
@@ -220,10 +235,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 app.start_x = None;
                                 app.start_y = None;
                             } else if app.selected_idx.is_some() {
-                                // 模式 B: 正在抓取中，按下 Enter 放开矩形
                                 app.selected_idx = None;
                             } else {
-                                // 模式 C: 尝试抓取圆点下的最高层矩形
                                 let top_z = app
                                     .rects
                                     .iter()
@@ -231,7 +244,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     .map(|r| r.z)
                                     .fold(f64::NEG_INFINITY, f64::max);
 
-                                // 找到那个 Z 值最大的矩形索引
                                 app.selected_idx = app.rects.iter().position(|r| {
                                     (r.z - top_z).abs() < f64::EPSILON
                                         && r.contains(app.dot_x, app.dot_y)
