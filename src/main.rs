@@ -146,7 +146,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             f.render_widget(canvas, area);
         })?;
 
-        if event::poll(Duration::from_millis(16))? {
+        if event::poll(Duration::from_millis(10))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == event::KeyEventKind::Press {
                     let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
