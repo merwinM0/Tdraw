@@ -95,52 +95,110 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Block::default()
                         .title("Tdraw")
                         .borders(Borders::ALL)
-                        .border_style(ratatui::style::Style::default().fg(Color::Black))
-                        .title_style(ratatui::style::Style::default().fg(Color::Black)),
+                         .border_style(ratatui::style::Style::default().fg(Color::Rgb(0, 0, 0)))
+                         .title_style(ratatui::style::Style::default().fg(Color::Rgb(0, 0, 0))),
                 )
                 .background_color(Color::Rgb(255, 255, 255))
                 .x_bounds([0.0, area.width as f64])
                 .y_bounds([0.0, area.height as f64])
                 .paint(|ctx| {
-                    let top_selected_z = app
-                        .rects
-                        .iter()
-                        .filter(|r| r.contains(app.dot_x, app.dot_y))
-                        .map(|r| r.z)
-                        .fold(f64::NEG_INFINITY, f64::max);
+                     // 计算悬停的矩形用于后续逻辑（如果需要）
 
-                    for r in &app.rects {
-                        let is_selected = (r.z - top_selected_z).abs() < f64::EPSILON;
-                        ctx.draw(&Rectangle {
-                            x: r.x,
-                            y: r.y,
-                            width: r.width,
-                            height: r.height,
-                            color: if is_selected {
-                                Color::Red
-                            } else {
-                                Color::Black
-                            },
-                        });
-                    }
+                     for (idx, r) in app.rects.iter().enumerate() {
+                         let is_selected = app.selected_idx == Some(idx);
+                         let is_hovered = r.contains(app.dot_x, app.dot_y) && !is_selected;
+                         
+                         let border_color = if is_selected {
+                             Color::Rgb(255, 0, 0) // 红色 - 选中
+                         } else if is_hovered {
+                             Color::Rgb(0, 0, 255) // 蓝色 - 悬停
+                         } else {
+                             Color::Rgb(0, 0, 0) // 黑色 - 普通
+                         };
+                         
+                         // 绘制矩形边框（四条线）
+                         // 上边框
+                         ctx.draw(&Rectangle {
+                             x: r.x,
+                             y: r.y,
+                             width: r.width,
+                             height: 0.1,
+                             color: border_color,
+                         });
+                         // 下边框
+                         ctx.draw(&Rectangle {
+                             x: r.x,
+                             y: r.y + r.height - 0.1,
+                             width: r.width,
+                             height: 0.1,
+                             color: border_color,
+                         });
+                         // 左边框
+                         ctx.draw(&Rectangle {
+                             x: r.x,
+                             y: r.y,
+                             width: 0.1,
+                             height: r.height,
+                             color: border_color,
+                         });
+                         // 右边框
+                         ctx.draw(&Rectangle {
+                             x: r.x + r.width - 0.1,
+                             y: r.y,
+                             width: 0.1,
+                             height: r.height,
+                             color: border_color,
+                         });
+                     }
 
-                    if let (Some(sx), Some(sy)) = (app.start_x, app.start_y) {
-                        ctx.draw(&Rectangle {
-                            x: sx.min(app.dot_x),
-                            y: sy.min(app.dot_y),
-                            width: (app.dot_x - sx).abs(),
-                            height: (app.dot_y - sy).abs(),
-                            color: Color::Blue,
-                        });
-                    }
-                    ctx.print(
-                        app.dot_x,
-                        app.dot_y,
-                        ratatui::text::Span::styled(
-                            "●",
-                            ratatui::style::Style::default().fg(Color::Black),
-                        ),
-                    );
+                     if let (Some(sx), Some(sy)) = (app.start_x, app.start_y) {
+                         // 绘制正在绘制的矩形边框
+                         let draw_x = sx.min(app.dot_x);
+                         let draw_y = sy.min(app.dot_y);
+                         let draw_width = (app.dot_x - sx).abs();
+                         let draw_height = (app.dot_y - sy).abs();
+                         
+                         // 上边框
+                         ctx.draw(&Rectangle {
+                             x: draw_x,
+                             y: draw_y,
+                             width: draw_width,
+                             height: 0.1,
+                             color: Color::Rgb(0, 0, 255),
+                         });
+                         // 下边框
+                         ctx.draw(&Rectangle {
+                             x: draw_x,
+                             y: draw_y + draw_height - 0.1,
+                             width: draw_width,
+                             height: 0.1,
+                             color: Color::Rgb(0, 0, 255),
+                         });
+                         // 左边框
+                         ctx.draw(&Rectangle {
+                             x: draw_x,
+                             y: draw_y,
+                             width: 0.1,
+                             height: draw_height,
+                             color: Color::Rgb(0, 0, 255),
+                         });
+                         // 右边框
+                         ctx.draw(&Rectangle {
+                             x: draw_x + draw_width - 0.1,
+                             y: draw_y,
+                             width: 0.1,
+                             height: draw_height,
+                             color: Color::Rgb(0, 0, 255),
+                         });
+                     }
+                     ctx.print(
+                         app.dot_x,
+                         app.dot_y,
+                         ratatui::text::Span::styled(
+                             "●",
+                             ratatui::style::Style::default().fg(Color::Rgb(0, 0, 0)),
+                         ),
+                     );
                 });
 
             f.render_widget(canvas, area);
@@ -236,19 +294,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 app.start_y = None;
                             } else if app.selected_idx.is_some() {
                                 app.selected_idx = None;
-                            } else {
-                                let top_z = app
-                                    .rects
-                                    .iter()
-                                    .filter(|r| r.contains(app.dot_x, app.dot_y))
-                                    .map(|r| r.z)
-                                    .fold(f64::NEG_INFINITY, f64::max);
-
-                                app.selected_idx = app.rects.iter().position(|r| {
-                                    (r.z - top_z).abs() < f64::EPSILON
-                                        && r.contains(app.dot_x, app.dot_y)
-                                });
-                            }
+                             } else {
+                                 // 找到小点所在的最上层矩形
+                                 let mut hovered_with_z: Vec<(usize, f64)> = app.rects.iter()
+                                     .enumerate()
+                                     .filter(|(_, r)| r.contains(app.dot_x, app.dot_y))
+                                     .map(|(idx, r)| (idx, r.z))
+                                     .collect();
+                                 
+                                 // 按 z 值降序排序，选择最上层的
+                                 hovered_with_z.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                                 
+                                 app.selected_idx = hovered_with_z.first().map(|(idx, _)| *idx);
+                             }
                         }
                         _ => {}
                     }
