@@ -116,39 +116,40 @@ fn main() -> Result<(), Box<dyn Error>> {
                              Color::Rgb(0, 0, 0) // 黑色 - 普通
                          };
                          
-                         // 绘制矩形边框（四条线）
-                         // 上边框
-                         ctx.draw(&Rectangle {
-                             x: r.x,
-                             y: r.y,
-                             width: r.width,
-                             height: 0.1,
-                             color: border_color,
-                         });
-                         // 下边框
-                         ctx.draw(&Rectangle {
-                             x: r.x,
-                             y: r.y + r.height - 0.1,
-                             width: r.width,
-                             height: 0.1,
-                             color: border_color,
-                         });
-                         // 左边框
-                         ctx.draw(&Rectangle {
-                             x: r.x,
-                             y: r.y,
-                             width: 0.1,
-                             height: r.height,
-                             color: border_color,
-                         });
-                         // 右边框
-                         ctx.draw(&Rectangle {
-                             x: r.x + r.width - 0.1,
-                             y: r.y,
-                             width: 0.1,
-                             height: r.height,
-                             color: border_color,
-                         });
+                          // 绘制矩形边框（使用更细的线避免重叠）
+                          let line_width = 0.05; // 更细的线宽
+                          // 上边框
+                          ctx.draw(&Rectangle {
+                              x: r.x,
+                              y: r.y,
+                              width: r.width,
+                              height: line_width,
+                              color: border_color,
+                          });
+                          // 下边框
+                          ctx.draw(&Rectangle {
+                              x: r.x,
+                              y: r.y + r.height - line_width,
+                              width: r.width,
+                              height: line_width,
+                              color: border_color,
+                          });
+                          // 左边框
+                          ctx.draw(&Rectangle {
+                              x: r.x,
+                              y: r.y,
+                              width: line_width,
+                              height: r.height,
+                              color: border_color,
+                          });
+                          // 右边框
+                          ctx.draw(&Rectangle {
+                              x: r.x + r.width - line_width,
+                              y: r.y,
+                              width: line_width,
+                              height: r.height,
+                              color: border_color,
+                          });
                      }
 
                      if let (Some(sx), Some(sy)) = (app.start_x, app.start_y) {
@@ -158,35 +159,37 @@ fn main() -> Result<(), Box<dyn Error>> {
                          let draw_width = (app.dot_x - sx).abs();
                          let draw_height = (app.dot_y - sy).abs();
                          
+                         // 绘制正在绘制的矩形边框（使用更细的线）
+                         let line_width = 0.05;
                          // 上边框
                          ctx.draw(&Rectangle {
                              x: draw_x,
                              y: draw_y,
                              width: draw_width,
-                             height: 0.1,
+                             height: line_width,
                              color: Color::Rgb(0, 0, 255),
                          });
                          // 下边框
                          ctx.draw(&Rectangle {
                              x: draw_x,
-                             y: draw_y + draw_height - 0.1,
+                             y: draw_y + draw_height - line_width,
                              width: draw_width,
-                             height: 0.1,
+                             height: line_width,
                              color: Color::Rgb(0, 0, 255),
                          });
                          // 左边框
                          ctx.draw(&Rectangle {
                              x: draw_x,
                              y: draw_y,
-                             width: 0.1,
+                             width: line_width,
                              height: draw_height,
                              color: Color::Rgb(0, 0, 255),
                          });
                          // 右边框
                          ctx.draw(&Rectangle {
-                             x: draw_x + draw_width - 0.1,
+                             x: draw_x + draw_width - line_width,
                              y: draw_y,
-                             width: 0.1,
+                             width: line_width,
                              height: draw_height,
                              color: Color::Rgb(0, 0, 255),
                          });
