@@ -1,391 +1,766 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
-    backend::{Backend, CrosstermBackend},
-    layout::{Alignment, Rect},
-    style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
+    layout::Rect,
+    style::{Color, Style},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    error::Error,
     fs,
     io::{self, stdout},
-    path::Path,
+    path::{Path, PathBuf},
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+const INK: Color = Color::Rgb(35, 35, 42);
+const PURPLE: Color = Color::Rgb(105, 65, 210);
+const SOFT: Color = Color::Rgb(239, 234, 255);
+const ITEMS: [&str; 4] = ["上移一层", "下移一层", "水平翻转", "垂直翻转"];
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Rectangle {
     x: f64,
     y: f64,
     z: f64,
     width: f64,
     height: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    text: String,
+}
+
+impl Rectangle {
+    fn valid(&self) -> bool {
+        [self.x, self.y, self.z, self.width, self.height]
+            .iter()
+            .all(|v| v.is_finite())
+            && self.x >= 0.0
+            && self.y >= 0.0
+            && self.width >= 1.0
+            && self.height >= 1.0
+    }
+
+    fn fit_text(&mut self) {
+        let width = self
+            .text
+            .split('\n')
+            .map(UnicodeWidthStr::width)
+            .max()
+            .unwrap_or(0);
+        self.width = self.width.max((width + 2) as f64);
+        self.height = self.height.max((self.text.split('\n').count() + 2) as f64);
+    }
+
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
 }
 
 #[derive(Debug, Clone)]
-enum AppMode {
+enum Mode {
     Normal,
-    Drawing(Rectangle),
-    Moving(usize),
-    Menu(usize, usize), // (selected rectangle index, selected menu item)
+    Drawing {
+        anchor: (f64, f64),
+    },
+    Moving {
+        index: usize,
+        original: Rectangle,
+        cursor: (f64, f64),
+    },
+    Editing {
+        index: usize,
+        original: Rectangle,
+        cursor: (f64, f64),
+        before_edit: Rectangle,
+    },
+    Menu {
+        index: usize,
+        original: Rectangle,
+        cursor: (f64, f64),
+        item: usize,
+    },
 }
 
-#[derive(Debug)]
 struct App {
-    cursor_x: f64,
-    cursor_y: f64,
     rectangles: Vec<Rectangle>,
-    mode: AppMode,
-    should_quit: bool,
+    cursor: (f64, f64),
+    size: (u16, u16),
+    mode: Mode,
+    path: PathBuf,
+    message: String,
+    dirty: bool,
+    quit: bool,
 }
 
 impl App {
-    fn new() -> Self {
-        Self {
-            cursor_x: 40.0, // Start in the middle
-            cursor_y: 12.0, // Start in the middle
-            rectangles: Vec::new(),
-            mode: AppMode::Normal,
-            should_quit: false,
-        }
-    }
-
-    fn load_rectangles(&mut self) -> Result<(), Box<dyn Error>> {
-        if Path::new("rects.json").exists() {
-            let data = fs::read_to_string("rects.json")?;
-            self.rectangles = serde_json::from_str(&data)?;
-        }
-        Ok(())
-    }
-
-    fn save_rectangles(&self) -> Result<(), Box<dyn Error>> {
-        let data = serde_json::to_string_pretty(&self.rectangles)?;
-        fs::write("rects.json", data)?;
-        Ok(())
-    }
-
-    fn move_cursor(&mut self, dx: f64, dy: f64) {
-        self.cursor_x += dx;
-        self.cursor_y += dy;
-    }
-
-    fn start_drawing(&mut self) {
-        let rect = Rectangle {
-            x: self.cursor_x,
-            y: self.cursor_y,
-            z: 0.0,
-            width: 1.0,
-            height: 1.0,
+    fn load(path: PathBuf, size: (u16, u16)) -> io::Result<Self> {
+        let rectangles: Vec<Rectangle> = match fs::read_to_string(&path) {
+            Ok(data) => serde_json::from_str(&data).map_err(io::Error::other)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e),
         };
-        self.mode = AppMode::Drawing(rect);
+        if !rectangles.iter().all(Rectangle::valid) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "rects.json 包含无效坐标或尺寸",
+            ));
+        }
+        Ok(Self {
+            rectangles,
+            cursor: ((size.0 / 2) as f64, (size.1 / 2) as f64),
+            size,
+            mode: Mode::Normal,
+            path,
+            message: "就绪 · 本地画布".into(),
+            dirty: false,
+            quit: false,
+        })
     }
 
-    fn update_drawing(&mut self, dx: f64, dy: f64) {
-        if let AppMode::Drawing(ref mut rect) = self.mode {
-            rect.width += dx;
-            rect.height += dy;
+    fn save(&mut self) -> bool {
+        let result = (|| -> io::Result<()> {
+            let data = serde_json::to_vec_pretty(&self.rectangles).map_err(io::Error::other)?;
+            let temp = self.path.with_extension("json.tmp");
+            fs::write(&temp, data)?;
+            fs::rename(temp, &self.path)
+        })();
+        match result {
+            Ok(()) => {
+                self.dirty = false;
+                self.message = "已保存 · rects.json".into();
+                true
+            }
+            Err(e) => {
+                self.dirty = true;
+                self.message = format!("保存失败: {e} · Ctrl+S 重试");
+                false
+            }
         }
     }
 
-    fn finish_drawing(&mut self) {
-        if let AppMode::Drawing(rect) = &self.mode {
-            let mut new_rect = rect.clone();
-            // Ensure width and height are positive
-            if new_rect.width < 0.0 {
-                new_rect.x += new_rect.width;
-                new_rect.width = -new_rect.width;
-            }
-            if new_rect.height < 0.0 {
-                new_rect.y += new_rect.height;
-                new_rect.height = -new_rect.height;
-            }
-            
-            // Find highest z value and set new rectangle to be on top
-            let max_z = self.rectangles.iter()
+    fn resize(&mut self, width: u16, height: u16) {
+        self.size = (width, height);
+        self.cursor.0 = self.cursor.0.clamp(0.0, width.saturating_sub(1) as f64);
+        self.cursor.1 = self.cursor.1.clamp(0.0, height.saturating_sub(1) as f64);
+    }
+
+    fn hovered(&self) -> Option<usize> {
+        self.rectangles
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.contains(self.cursor.0, self.cursor.1))
+            .max_by(|(ai, a), (bi, b)| a.z.total_cmp(&b.z).then(ai.cmp(bi)))
+            .map(|(i, _)| i)
+    }
+
+    fn preview(&self, anchor: (f64, f64)) -> Rectangle {
+        Rectangle {
+            text: String::new(),
+            x: anchor.0.min(self.cursor.0),
+            y: anchor.1.min(self.cursor.1),
+            width: (anchor.0 - self.cursor.0).abs() + 1.0,
+            height: (anchor.1 - self.cursor.1).abs() + 1.0,
+            z: self
+                .rectangles
+                .iter()
                 .map(|r| r.z)
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap_or(0.0);
-            new_rect.z = max_z + 1.0;
-            
-            self.rectangles.push(new_rect);
-            self.mode = AppMode::Normal;
+                .max_by(f64::total_cmp)
+                .map_or(0.0, |z| z + 1.0),
         }
     }
 
-    fn find_rectangle_at_cursor(&self) -> Option<usize> {
-        // Sort by z value (highest first) to check top rectangles first
-        let mut indices: Vec<usize> = (0..self.rectangles.len()).collect();
-        indices.sort_by(|&a, &b| {
-            self.rectangles[b].z.partial_cmp(&self.rectangles[a].z).unwrap()
-        });
-        
-        for &i in &indices {
-            let rect = &self.rectangles[i];
-            if self.cursor_x >= rect.x && self.cursor_x <= rect.x + rect.width &&
-               self.cursor_y >= rect.y && self.cursor_y <= rect.y + rect.height {
-                return Some(i);
+    fn cancel(&mut self) {
+        match self.mode.clone() {
+            Mode::Editing {
+                index,
+                original,
+                cursor,
+                before_edit,
+            } => {
+                self.rectangles[index] = before_edit;
+                self.mode = Mode::Moving {
+                    index,
+                    original,
+                    cursor,
+                };
+                return;
             }
-        }
-        None
-    }
-
-    fn select_rectangle(&mut self) {
-        if let Some(index) = self.find_rectangle_at_cursor() {
-            self.mode = AppMode::Moving(index);
-        }
-    }
-
-    fn move_selected_rectangle(&mut self, dx: f64, dy: f64) {
-        if let AppMode::Moving(index) = self.mode {
-            if let Some(rect) = self.rectangles.get_mut(index) {
-                rect.x += dx;
-                rect.y += dy;
+            Mode::Menu {
+                index,
+                original,
+                cursor,
+                ..
+            } => {
+                self.mode = Mode::Moving {
+                    index,
+                    original,
+                    cursor,
+                };
+                return;
             }
+            Mode::Moving {
+                index,
+                original,
+                cursor,
+            } => {
+                self.rectangles[index] = original;
+                self.cursor = cursor;
+                self.resize(self.size.0, self.size.1);
+            }
+            _ => {}
         }
+        self.mode = Mode::Normal;
     }
 
-    fn finish_moving(&mut self) {
-        self.mode = AppMode::Normal;
-    }
-
-    fn delete_selected_rectangle(&mut self) {
-        if let AppMode::Moving(index) = self.mode {
-            if index < self.rectangles.len() {
+    fn key(&mut self, key: KeyEvent) {
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('q') => {
+                    if matches!(self.mode, Mode::Menu { .. } | Mode::Editing { .. }) {
+                        self.cancel();
+                    }
+                    self.cancel();
+                    if !self.dirty || self.save() {
+                        self.quit = true;
+                    }
+                }
+                KeyCode::Char('d') if matches!(self.mode, Mode::Normal) => {
+                    self.mode = Mode::Drawing {
+                        anchor: self.cursor,
+                    };
+                }
+                KeyCode::Char('s') if matches!(self.mode, Mode::Normal) => {
+                    self.save();
+                }
+                KeyCode::Char('j') if matches!(self.mode, Mode::Editing { .. }) => {
+                    if let Mode::Editing { index, .. } = self.mode {
+                        self.rectangles[index].text.push('\n');
+                        self.rectangles[index].fit_text();
+                    }
+                }
+                KeyCode::Char('z') => self.message = "撤回暂未启用".into(),
+                _ => {}
+            }
+            return;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            return;
+        }
+        if let Mode::Editing { index, .. } = self.mode {
+            match key.code {
+                KeyCode::Esc => self.cancel(),
+                KeyCode::Enter => self.commit(),
+                KeyCode::Backspace => {
+                    let text = &mut self.rectangles[index].text;
+                    if let Some((offset, _)) = text.grapheme_indices(true).next_back() {
+                        text.truncate(offset);
+                    }
+                }
+                KeyCode::Char(c) if !c.is_control() => {
+                    self.rectangles[index].text.push(c);
+                    self.rectangles[index].fit_text();
+                }
+                _ => {}
+            }
+            return;
+        }
+        if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+            self.cancel();
+            return;
+        }
+        if let Mode::Menu { ref mut item, .. } = self.mode {
+            match key.code {
+                KeyCode::Char('w') | KeyCode::Up => *item = (*item + 3) % 4,
+                KeyCode::Char('s') | KeyCode::Down => *item = (*item + 1) % 4,
+                KeyCode::Enter => {
+                    self.cancel();
+                    self.message = "菜单仅作预览 · 尚未执行操作".into();
+                }
+                _ => {}
+            }
+            return;
+        }
+        let delta = match key.code {
+            KeyCode::Char('w') | KeyCode::Up => Some((0.0, -1.0)),
+            KeyCode::Char('a') | KeyCode::Left => Some((-1.0, 0.0)),
+            KeyCode::Char('s') | KeyCode::Down => Some((0.0, 1.0)),
+            KeyCode::Char('d') | KeyCode::Right => Some((1.0, 0.0)),
+            _ => None,
+        };
+        if let Some((mut dx, mut dy)) = delta {
+            dx = (self.cursor.0 + dx).clamp(0.0, self.size.0.saturating_sub(1) as f64)
+                - self.cursor.0;
+            dy = (self.cursor.1 + dy).clamp(0.0, self.size.1.saturating_sub(1) as f64)
+                - self.cursor.1;
+            if let Mode::Moving { index, .. } = self.mode {
+                let r = &mut self.rectangles[index];
+                dx = dx.max(-r.x);
+                dy = dy.max(-r.y);
+                r.x += dx;
+                r.y += dy;
+            }
+            self.cursor.0 += dx;
+            self.cursor.1 += dy;
+            return;
+        }
+        match (key.code, self.mode.clone()) {
+            (KeyCode::Enter, Mode::Normal) => {
+                if let Some(index) = self.hovered() {
+                    self.mode = Mode::Moving {
+                        index,
+                        original: self.rectangles[index].clone(),
+                        cursor: self.cursor,
+                    };
+                }
+            }
+            (KeyCode::Enter, Mode::Drawing { anchor }) => {
+                self.rectangles.push(self.preview(anchor));
+                self.commit();
+            }
+            (KeyCode::Enter, Mode::Moving { .. }) => self.commit(),
+            (
+                KeyCode::Char('r'),
+                Mode::Moving {
+                    index,
+                    original,
+                    cursor,
+                },
+            ) => {
+                self.mode = Mode::Editing {
+                    index,
+                    original,
+                    cursor,
+                    before_edit: self.rectangles[index].clone(),
+                };
+                self.rectangles[index].fit_text();
+            }
+            (KeyCode::Backspace | KeyCode::Delete, Mode::Moving { index, .. }) => {
                 self.rectangles.remove(index);
-                self.mode = AppMode::Normal;
+                self.commit();
             }
+            (
+                KeyCode::Char('m'),
+                Mode::Moving {
+                    index,
+                    original,
+                    cursor,
+                },
+            ) => {
+                self.mode = Mode::Menu {
+                    index,
+                    original,
+                    cursor,
+                    item: 0,
+                };
+            }
+            _ => {}
         }
     }
 
-    fn open_menu(&mut self) {
-        if let AppMode::Moving(index) = self.mode {
-            self.mode = AppMode::Menu(index, 0);
-        }
+    fn commit(&mut self) {
+        self.mode = Mode::Normal;
+        self.dirty = true;
+        self.save();
     }
+}
 
-    fn navigate_menu(&mut self, up: bool) {
-        if let AppMode::Menu(_index, ref mut selection) = self.mode {
-            let menu_items = 4; // 上移一层，下移一层，水平翻转，垂直翻转
-            if up {
-                *selection = (*selection + menu_items - 1) % menu_items;
+// Draw only visible cells: clipping must not manufacture borders at viewport edges.
+fn draw_rectangle(f: &mut Frame, r: &Rectangle, color: Color) {
+    let area = f.area();
+    let left = r.x.floor();
+    let top = r.y.floor();
+    let right = left + r.width.floor() - 1.0;
+    let bottom = top + r.height.floor() - 1.0;
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let px = x as f64;
+            let py = y as f64;
+            if px < left || px > right || py < top || py > bottom {
+                continue;
+            }
+            let symbol = if py == top && px == left {
+                "┌"
+            } else if py == top && px == right {
+                "┐"
+            } else if py == bottom && px == left {
+                "└"
+            } else if py == bottom && px == right {
+                "┘"
+            } else if py == top || py == bottom {
+                "─"
+            } else if px == left || px == right {
+                "│"
             } else {
-                *selection = (*selection + 1) % menu_items;
-            }
-        }
-    }
-
-    fn close_menu(&mut self) {
-        if let AppMode::Menu(index, _) = self.mode {
-            self.mode = AppMode::Moving(index);
-        }
-    }
-
-    fn handle_key(&mut self, key: KeyEvent) {
-        match self.mode {
-            AppMode::Normal => self.handle_normal_mode(key),
-            AppMode::Drawing(_) => self.handle_drawing_mode(key),
-            AppMode::Moving(_) => self.handle_moving_mode(key),
-            AppMode::Menu(_, _) => self.handle_menu_mode(key),
-        }
-    }
-
-    fn handle_normal_mode(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.start_drawing();
-            }
-            KeyCode::Char('w') => self.move_cursor(0.0, -1.0),
-            KeyCode::Char('a') => self.move_cursor(-1.0, 0.0),
-            KeyCode::Char('s') => self.move_cursor(0.0, 1.0),
-            KeyCode::Char('d') => self.move_cursor(1.0, 0.0),
-            KeyCode::Enter => self.select_rectangle(),
-            _ => {}
-        }
-    }
-
-    fn handle_drawing_mode(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('w') => self.update_drawing(0.0, -1.0),
-            KeyCode::Char('a') => self.update_drawing(-1.0, 0.0),
-            KeyCode::Char('s') => self.update_drawing(0.0, 1.0),
-            KeyCode::Char('d') => self.update_drawing(1.0, 0.0),
-            KeyCode::Enter => self.finish_drawing(),
-            KeyCode::Char('q') => self.mode = AppMode::Normal,
-            _ => {}
-        }
-    }
-
-    fn handle_moving_mode(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('w') => self.move_selected_rectangle(0.0, -1.0),
-            KeyCode::Char('a') => self.move_selected_rectangle(-1.0, 0.0),
-            KeyCode::Char('s') => self.move_selected_rectangle(0.0, 1.0),
-            KeyCode::Char('d') => self.move_selected_rectangle(1.0, 0.0),
-            KeyCode::Enter => self.finish_moving(),
-            KeyCode::Backspace => self.delete_selected_rectangle(),
-            KeyCode::Char('m') => self.open_menu(),
-            KeyCode::Char('q') => self.mode = AppMode::Normal,
-            _ => {}
-        }
-    }
-
-    fn handle_menu_mode(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('w') => self.navigate_menu(true),
-            KeyCode::Char('s') => self.navigate_menu(false),
-            KeyCode::Enter => self.close_menu(),
-            KeyCode::Char('q') => self.close_menu(),
-            _ => {}
+                " "
+            };
+            f.buffer_mut()[(x, y)]
+                .set_symbol(symbol)
+                .set_style(Style::default().fg(color).bg(Color::White));
         }
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    // Setup terminal
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Create app and run it
-    let mut app = App::new();
-    app.load_rectangles()?;
-    let res = run_app(&mut terminal, &mut app);
-
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    if let Err(err) = res {
-        println!("{:?}", err);
+fn draw_text(f: &mut Frame, r: &Rectangle) {
+    let area = f.area();
+    let left = r.x.floor() + 1.0;
+    let top = r.y.floor() + 1.0;
+    if left >= area.right() as f64 || top >= area.bottom() as f64 {
+        return;
     }
-
-    // Save rectangles on exit
-    app.save_rectangles()?;
-
-    Ok(())
+    let width = (r.width.floor() - 2.0)
+        .max(0.0)
+        .min(area.right() as f64 - left) as u16;
+    let height = (r.height.floor() - 2.0)
+        .max(0.0)
+        .min(area.bottom() as f64 - top) as u16;
+    f.render_widget(
+        Paragraph::new(r.text.as_str()).style(Style::default().fg(INK).bg(Color::White)),
+        Rect::new(left as u16, top as u16, width, height),
+    );
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
-    loop {
-        terminal.draw(|f| ui(f, app)).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{}", e)))?;
-
-        if let Event::Key(key) = event::read()? {
-            app.handle_key(key);
-        }
-
-        if app.should_quit {
-            return Ok(());
-        }
-    }
+fn panel() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Rgb(205, 198, 225)))
+        .style(Style::default().fg(INK).bg(Color::White))
 }
 
 fn ui(f: &mut Frame, app: &App) {
-    let size = f.area();
-    
-    // Draw white canvas
-    let canvas = Block::default()
-        .style(Style::default().bg(Color::White));
-    f.render_widget(canvas, size);
-    
-    // Draw rectangles
-    let mut sorted_rectangles: Vec<(usize, &Rectangle)> = app.rectangles.iter().enumerate().collect();
-    sorted_rectangles.sort_by(|(_, a), (_, b)| a.z.partial_cmp(&b.z).unwrap());
-    
-    for (index, rect) in sorted_rectangles {
-        let rect_area = Rect::new(
-            rect.x as u16,
-            rect.y as u16,
-            rect.width.max(1.0) as u16,
-            rect.height.max(1.0) as u16,
+    let area = f.area();
+    f.render_widget(
+        Block::default().style(Style::default().bg(Color::White).fg(INK)),
+        area,
+    );
+    let selected = match app.mode {
+        Mode::Moving { index, .. } | Mode::Menu { index, .. } | Mode::Editing { index, .. } => {
+            Some(index)
+        }
+        _ => None,
+    };
+    let hovered = if matches!(app.mode, Mode::Normal) {
+        app.hovered()
+    } else {
+        None
+    };
+    let mut order: Vec<_> = app.rectangles.iter().enumerate().collect();
+    order.sort_by(|(ai, a), (bi, b)| a.z.total_cmp(&b.z).then(ai.cmp(bi)));
+    for (i, r) in order {
+        draw_rectangle(
+            f,
+            r,
+            if selected == Some(i) {
+                PURPLE
+            } else if hovered == Some(i) {
+                Color::Blue
+            } else {
+                INK
+            },
         );
-        
-        let is_selected = match app.mode {
-            AppMode::Moving(selected_idx) => selected_idx == index,
-            AppMode::Menu(selected_idx, _) => selected_idx == index,
-            _ => false,
-        };
-        
-        let is_hovered = app.find_rectangle_at_cursor() == Some(index) && matches!(app.mode, AppMode::Normal);
-        
-        let border_color = if is_selected {
-            Color::Red
-        } else if is_hovered {
-            Color::Blue
+        draw_text(f, r);
+    }
+    if let Mode::Drawing { anchor } = app.mode {
+        draw_rectangle(f, &app.preview(anchor), PURPLE);
+    }
+    let (mode, help) = match app.mode {
+        Mode::Normal => ("选择", "WASD 移动 · Ctrl+D 矩形 · Enter 选择 · Ctrl+Q 退出"),
+        Mode::Drawing { .. } => (
+            "矩形",
+            "WASD 调整对角点 · Enter 保存 · Q 取消 · Ctrl+Q 退出",
+        ),
+        Mode::Moving { .. } => (
+            "移动",
+            "WASD 移动 · R 文字 · Enter 保存 · Q 还原 · ⌫ 删除 · M 菜单",
+        ),
+        Mode::Editing { .. } => (
+            "文字",
+            "输入文字 · Ctrl+J 换行 · ⌫ 退格 · Enter 保存 · Esc 取消",
+        ),
+        Mode::Menu { .. } => ("菜单", "W/S 选择 · Enter 预览 · Q 返回 · Ctrl+Q 退出"),
+    };
+    if area.width >= 20 && area.height >= 8 {
+        let width = area.width.saturating_sub(4).min(66);
+        f.render_widget(
+            Paragraph::new(format!(" Tdraw   │   ↖ 选择    ▣ 矩形 Ctrl+D   │   {mode}"))
+                .block(panel())
+                .style(Style::default().fg(PURPLE).bg(SOFT)),
+            Rect::new((area.width - width) / 2, 0, width, 3),
+        );
+        f.render_widget(
+            Paragraph::new(format!(
+                " {help}\n {}  │  {} 区块  │  {},{}{}",
+                app.message,
+                app.rectangles.len(),
+                app.cursor.0,
+                app.cursor.1,
+                if app.dirty { " · 未保存" } else { "" }
+            ))
+            .style(Style::default().fg(INK).bg(SOFT)),
+            Rect::new(0, area.height - 2, area.width, 2),
+        );
+    }
+    let (x, y) = (app.cursor.0 as u16, app.cursor.1 as u16);
+    if let Mode::Editing { index, .. } = app.mode {
+        let r = &app.rectangles[index];
+        let tx = r.x.floor() + 1.0 + r.text.split('\n').next_back().unwrap_or("").width() as f64;
+        let ty = r.y.floor() + r.text.split('\n').count() as f64;
+        if tx < area.width as f64 && ty < area.height as f64 {
+            f.set_cursor_position((tx as u16, ty as u16));
+        }
+    } else if x < area.width && y < area.height {
+        f.render_widget(
+            Paragraph::new("●").style(Style::default().fg(Color::Black).bg(Color::White)),
+            Rect::new(x, y, 1, 1),
+        );
+    }
+    if let Mode::Menu { item, .. } = app.mode {
+        let width = area.width.min(26);
+        let height = area.height.min(7);
+        let mx = if x.saturating_add(2).saturating_add(width) <= area.width {
+            x + 2
         } else {
-            Color::Black
+            x.saturating_sub(width)
         };
-        
-        let rect_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color));
-        
-        f.render_widget(rect_block, rect_area);
-        
-        // Draw z value in the center of rectangle
-        let center_x = rect.x as u16 + rect.width as u16 / 2;
-        let center_y = rect.y as u16 + rect.height as u16 / 2;
-        if center_x < size.width && center_y < size.height {
-            let z_text = Paragraph::new(format!("z: {:.0}", rect.z))
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::Black));
-            f.render_widget(z_text, Rect::new(center_x.saturating_sub(5), center_y, 10, 1));
+        let my = y.min(area.height.saturating_sub(height));
+        let popup = Rect::new(mx, my, width, height);
+        f.render_widget(Clear, popup);
+        f.render_widget(panel().title(" 区块操作 · 预览 "), popup);
+        for (i, label) in ITEMS.iter().enumerate() {
+            if i as u16 + 2 >= height {
+                break;
+            }
+            f.render_widget(
+                Paragraph::new(format!(" {} {label}", if i == item { "›" } else { " " })).style(
+                    Style::default()
+                        .fg(if i == item { PURPLE } else { INK })
+                        .bg(if i == item { SOFT } else { Color::White }),
+                ),
+                Rect::new(mx + 1, my + 1 + i as u16, width.saturating_sub(2), 1),
+            );
         }
     }
-    
-    // Draw cursor
-    let cursor_x = app.cursor_x as u16;
-    let cursor_y = app.cursor_y as u16;
-    if cursor_x < size.width && cursor_y < size.height {
-        let cursor = Paragraph::new("●")
-            .style(Style::default().fg(Color::Black));
-        f.render_widget(cursor, Rect::new(cursor_x, cursor_y, 1, 1));
+}
+
+struct TerminalGuard;
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
     }
-    
-    // Draw mode indicator
-    let mode_text = match app.mode {
-        AppMode::Normal => "Normal Mode".to_string(),
-        AppMode::Drawing(_) => "Drawing Mode - Use WASD to resize, Enter to confirm, q to cancel".to_string(),
-        AppMode::Moving(_) => "Moving Mode - Use WASD to move, Enter to confirm, Backspace to delete, m for menu, q to cancel".to_string(),
-        AppMode::Menu(_, selection) => {
-            let menu_items = ["上移一层", "下移一层", "水平翻转", "垂直翻转"];
-            format!("Menu - {} (Use WS to navigate, Enter/q to close)", menu_items[selection])
+}
+
+fn main() -> io::Result<()> {
+    // Validate before taking over the terminal; malformed files are never overwritten.
+    let mut app = App::load(Path::new("rects.json").into(), crossterm::terminal::size()?)?;
+    enable_raw_mode()?;
+    let _guard = TerminalGuard;
+    let old_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        old_hook(info);
+    }));
+    execute!(stdout(), EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(stdout()))?;
+    while !app.quit {
+        terminal.draw(|f| ui(f, &app))?;
+        match event::read()? {
+            Event::Key(key) => app.key(key),
+            Event::Resize(w, h) => app.resize(w, h),
+            _ => {}
         }
-    };
-    
-    let mode_indicator = Paragraph::new(mode_text)
-        .style(Style::default().fg(Color::Black).bg(Color::Gray))
-        .block(Block::default().borders(Borders::ALL));
-    
-    let mode_area = Rect::new(0, 0, size.width.min(80), 3);
-    f.render_widget(mode_indicator, mode_area);
-    
-    // Draw help text
-    let help_text = match app.mode {
-        AppMode::Normal => "Ctrl+D: Draw | Ctrl+Q: Quit | WASD: Move cursor | Enter: Select",
-        AppMode::Drawing(_) => "WASD: Resize rectangle | Enter: Confirm | Q: Cancel",
-        AppMode::Moving(_) => "WASD: Move rectangle | Enter: Confirm | Backspace: Delete | M: Menu | Q: Cancel",
-        AppMode::Menu(_, _) => "W/S: Navigate menu | Enter/Q: Close menu",
-    };
-    
-    let help = Paragraph::new(help_text)
-        .style(Style::default().fg(Color::Black).bg(Color::Gray))
-        .block(Block::default().borders(Borders::ALL));
-    
-    let help_area = Rect::new(0, size.height.saturating_sub(3), size.width, 3);
-    f.render_widget(help, help_area);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    fn app() -> App {
+        let path = std::env::temp_dir().join(format!(
+            "tdraw-{}-{}.json",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        App::load(path, (80, 24)).unwrap()
+    }
+    fn key(app: &mut App, code: KeyCode) {
+        app.key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    fn ctrl(app: &mut App, c: char) {
+        app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+    }
+    fn draw(app: &mut App) {
+        ctrl(app, 'd');
+        key(app, KeyCode::Char('a'));
+        key(app, KeyCode::Char('w'));
+        key(app, KeyCode::Enter);
+    }
+    #[test]
+    fn drawing_preview_and_persistence() {
+        let mut a = app();
+        draw(&mut a);
+        assert_eq!(
+            a.rectangles[0],
+            Rectangle {
+                x: 39.0,
+                y: 11.0,
+                width: 2.0,
+                height: 2.0,
+                z: 0.0,
+                text: String::new()
+            }
+        );
+        assert_eq!(
+            App::load(a.path.clone(), a.size).unwrap().rectangles,
+            a.rectangles
+        );
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn move_cancel_menu_and_delete() {
+        let mut a = app();
+        draw(&mut a);
+        let original = a.rectangles.clone();
+        key(&mut a, KeyCode::Enter);
+        key(&mut a, KeyCode::Char('d'));
+        key(&mut a, KeyCode::Char('m'));
+        let cursor = a.cursor;
+        key(&mut a, KeyCode::Char('d'));
+        key(&mut a, KeyCode::Char('w'));
+        assert_eq!(a.cursor, cursor);
+        key(&mut a, KeyCode::Enter);
+        key(&mut a, KeyCode::Char('q'));
+        assert_eq!(a.rectangles, original);
+        key(&mut a, KeyCode::Enter);
+        key(&mut a, KeyCode::Backspace);
+        assert!(
+            App::load(a.path.clone(), a.size)
+                .unwrap()
+                .rectangles
+                .is_empty()
+        );
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn layers_and_bounds() {
+        let mut a = app();
+        draw(&mut a);
+        a.cursor = (40.0, 12.0);
+        draw(&mut a);
+        assert_eq!(a.hovered(), Some(1));
+        a.cursor = (41.0, 12.0);
+        assert_eq!(a.hovered(), None);
+        a.resize(1, 1);
+        key(&mut a, KeyCode::Char('a'));
+        assert_eq!(a.cursor, (0.0, 0.0));
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn quit_cancels_unconfirmed_changes() {
+        let mut a = app();
+        draw(&mut a);
+        let original = a.rectangles.clone();
+        key(&mut a, KeyCode::Enter);
+        key(&mut a, KeyCode::Char('d'));
+        key(&mut a, KeyCode::Char('m'));
+        ctrl(&mut a, 'q');
+        assert!(a.quit);
+        assert_eq!(a.rectangles, original);
+        fs::remove_file(a.path).unwrap();
+        let mut a = app();
+        ctrl(&mut a, 'd');
+        ctrl(&mut a, 'q');
+        assert!(a.quit);
+        assert!(!a.path.exists());
+    }
+    #[test]
+    fn render_small_and_clipped_canvases() {
+        let mut a = app();
+        a.rectangles.push(Rectangle {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            width: 100000.0,
+            height: 100000.0,
+            text: String::new(),
+        });
+        a.mode = Mode::Menu {
+            index: 0,
+            original: a.rectangles[0].clone(),
+            cursor: a.cursor,
+            item: 0,
+        };
+        for (w, h) in [(1, 1), (8, 4), (80, 24)] {
+            a.resize(w, h);
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            terminal.draw(|f| ui(f, &a)).unwrap();
+        }
+    }
+    #[test]
+    fn text_editing_grows_saves_and_loads() {
+        let mut a = app();
+        draw(&mut a);
+        key(&mut a, KeyCode::Enter);
+        key(&mut a, KeyCode::Char('r'));
+        for c in "中文qwasd".chars() {
+            key(&mut a, KeyCode::Char(c));
+        }
+        ctrl(&mut a, 'j');
+        key(&mut a, KeyCode::Char('好'));
+        assert_eq!(a.rectangles[0].width, 11.0);
+        assert_eq!(a.rectangles[0].height, 4.0);
+        key(&mut a, KeyCode::Enter);
+        let loaded = App::load(a.path.clone(), a.size).unwrap();
+        assert_eq!(loaded.rectangles[0].text, "中文qwasd\n好");
+        assert_eq!(loaded.rectangles, a.rectangles);
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn text_cancel_backspace_and_quit() {
+        let mut a = app();
+        draw(&mut a);
+        let original = a.rectangles.clone();
+        key(&mut a, KeyCode::Enter);
+        key(&mut a, KeyCode::Char('r'));
+        for c in "e\u{301}".chars() {
+            key(&mut a, KeyCode::Char(c));
+        }
+        key(&mut a, KeyCode::Backspace);
+        assert!(a.rectangles[0].text.is_empty());
+        key(&mut a, KeyCode::Esc);
+        assert_eq!(a.rectangles, original);
+        assert!(matches!(a.mode, Mode::Moving { .. }));
+        key(&mut a, KeyCode::Char('r'));
+        key(&mut a, KeyCode::Char('中'));
+        ctrl(&mut a, 'q');
+        assert!(a.quit);
+        assert_eq!(a.rectangles, original);
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn legacy_json_defaults_to_empty_text() {
+        let r: Rectangle =
+            serde_json::from_str(r#"{"x":0,"y":0,"z":0,"width":3,"height":3}"#).unwrap();
+        assert!(r.text.is_empty());
+    }
+    #[test]
+    fn invalid_file_is_preserved() {
+        let a = app();
+        fs::write(&a.path, "not json").unwrap();
+        assert!(App::load(a.path.clone(), a.size).is_err());
+        assert_eq!(fs::read_to_string(&a.path).unwrap(), "not json");
+        fs::remove_file(a.path).unwrap();
+    }
 }
