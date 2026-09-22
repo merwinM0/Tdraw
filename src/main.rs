@@ -1,3 +1,6 @@
+mod connection;
+use connection::{Anchor, Connection};
+
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -32,6 +35,8 @@ struct Rectangle {
     height: f64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    connections: Vec<Connection>,
 }
 
 impl Rectangle {
@@ -64,6 +69,11 @@ impl Rectangle {
 #[derive(Debug, Clone)]
 enum Mode {
     Normal,
+    Connecting {
+        source: usize,
+        anchor: Anchor,
+        arrow: bool,
+    },
     Drawing {
         anchor: (f64, f64),
     },
@@ -108,6 +118,16 @@ impl App {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "rects.json 包含无效坐标或尺寸",
+            ));
+        }
+        if rectangles.iter().enumerate().any(|(i, r)| {
+            r.connections.iter().any(|c| {
+                c.target >= rectangles.len() || c.target == i || !c.from.valid() || !c.to.valid()
+            })
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "rects.json 包含无效连接",
             ));
         }
         Ok(Self {
@@ -158,9 +178,16 @@ impl App {
             .map(|(i, _)| i)
     }
 
+    fn boundary(&self) -> Option<(usize, Anchor)> {
+        // A hidden lower border must not be selected through an opaque upper box.
+        let index = self.hovered()?;
+        Anchor::at(&self.rectangles[index], self.cursor).map(|anchor| (index, anchor))
+    }
+
     fn preview(&self, anchor: (f64, f64)) -> Rectangle {
         Rectangle {
             text: String::new(),
+            connections: Vec::new(),
             x: anchor.0.min(self.cursor.0),
             y: anchor.1.min(self.cursor.1),
             width: (anchor.0 - self.cursor.0).abs() + 1.0,
@@ -311,7 +338,42 @@ impl App {
             self.cursor.1 += dy;
             return;
         }
+        if let Mode::Connecting {
+            source,
+            anchor,
+            arrow,
+        } = self.mode
+        {
+            if key.code == KeyCode::Enter
+                || key.code == KeyCode::Char(if arrow { 'k' } else { 'l' })
+            {
+                if let Some((target, to)) = self.boundary().filter(|(i, _)| *i != source) {
+                    self.rectangles[source].connections.push(Connection {
+                        target,
+                        from: anchor,
+                        to,
+                        arrow,
+                    });
+                    self.commit();
+                } else {
+                    self.message = "请将光标移至另一个方框的可见边界".into();
+                }
+            }
+            return;
+        }
         match (key.code, self.mode.clone()) {
+            (KeyCode::Char(c @ ('l' | 'k')), Mode::Normal) => {
+                if let Some((source, anchor)) = self.boundary() {
+                    self.mode = Mode::Connecting {
+                        source,
+                        anchor,
+                        arrow: c == 'k',
+                    };
+                    self.message = "已固定起点 · 移至另一个方框边界确认".into();
+                } else {
+                    self.message = "请先将光标移至方框的可见边界".into();
+                }
+            }
             (KeyCode::Enter, Mode::Normal) => {
                 if let Some(index) = self.hovered() {
                     self.mode = Mode::Moving {
@@ -344,6 +406,14 @@ impl App {
             }
             (KeyCode::Backspace | KeyCode::Delete, Mode::Moving { index, .. }) => {
                 self.rectangles.remove(index);
+                for r in &mut self.rectangles {
+                    r.connections.retain(|c| c.target != index);
+                    for c in &mut r.connections {
+                        if c.target > index {
+                            c.target -= 1;
+                        }
+                    }
+                }
                 self.commit();
             }
             (
@@ -441,13 +511,42 @@ fn ui(f: &mut Frame, app: &App) {
         Block::default().style(Style::default().bg(Color::White).fg(INK)),
         area,
     );
+    for r in &app.rectangles {
+        for c in &r.connections {
+            connection::draw(
+                f,
+                (r, c.from),
+                c.to.point(&app.rectangles[c.target]),
+                Some(c.to),
+                c.arrow,
+                false,
+            );
+        }
+    }
+    if let Mode::Connecting {
+        source,
+        anchor,
+        arrow,
+    } = app.mode
+    {
+        let target = app.boundary().filter(|(i, _)| *i != source);
+        connection::draw(
+            f,
+            (&app.rectangles[source], anchor),
+            app.cursor,
+            target.map(|(_, a)| a),
+            arrow,
+            true,
+        );
+    }
     let selected = match app.mode {
+        Mode::Connecting { source, .. } => Some(source),
         Mode::Moving { index, .. } | Mode::Menu { index, .. } | Mode::Editing { index, .. } => {
             Some(index)
         }
         _ => None,
     };
-    let hovered = if matches!(app.mode, Mode::Normal) {
+    let hovered = if matches!(app.mode, Mode::Normal | Mode::Connecting { .. }) {
         app.hovered()
     } else {
         None
@@ -472,7 +571,14 @@ fn ui(f: &mut Frame, app: &App) {
         draw_rectangle(f, &app.preview(anchor), PURPLE);
     }
     let (mode, help) = match app.mode {
-        Mode::Normal => ("选择", "WASD 移动 · Ctrl+D 矩形 · Enter 选择 · Ctrl+Q 退出"),
+        Mode::Normal => (
+            "选择",
+            "WASD 移动 · Ctrl+D 矩形 · L 连线 · K 箭头 · Enter 选择 · Ctrl+Q 退出",
+        ),
+        Mode::Connecting { arrow, .. } => (
+            if arrow { "箭头" } else { "连线" },
+            "WASD 移动 · 另一方框边界 Enter 确认 · Q 取消",
+        ),
         Mode::Drawing { .. } => (
             "矩形",
             "WASD 调整对角点 · Enter 保存 · Q 取消 · Ctrl+Q 退出",
@@ -619,7 +725,8 @@ mod tests {
                 width: 2.0,
                 height: 2.0,
                 z: 0.0,
-                text: String::new()
+                text: String::new(),
+                connections: Vec::new()
             }
         );
         assert_eq!(
@@ -695,6 +802,7 @@ mod tests {
             width: 100000.0,
             height: 100000.0,
             text: String::new(),
+            connections: Vec::new(),
         });
         a.mode = Mode::Menu {
             index: 0,
@@ -754,6 +862,99 @@ mod tests {
         let r: Rectangle =
             serde_json::from_str(r#"{"x":0,"y":0,"z":0,"width":3,"height":3}"#).unwrap();
         assert!(r.text.is_empty());
+    }
+    fn connected(arrow: bool) -> App {
+        let mut a = app();
+        a.cursor = (10.0, 10.0);
+        draw(&mut a);
+        a.cursor = (30.0, 10.0);
+        draw(&mut a);
+        a.cursor = (10.0, 10.0);
+        key(&mut a, KeyCode::Char(if arrow { 'k' } else { 'l' }));
+        let original = a.rectangles.clone();
+        key(&mut a, KeyCode::Char('d'));
+        assert_eq!(a.rectangles, original);
+        a.cursor = (29.0, 10.0);
+        key(&mut a, KeyCode::Enter);
+        assert!(matches!(a.mode, Mode::Normal));
+        a
+    }
+    #[test]
+    fn connections_persist_follow_and_delete() {
+        for arrow in [false, true] {
+            let mut a = connected(arrow);
+            let c = a.rectangles[0].connections[0].clone();
+            assert_eq!(c.target, 1);
+            assert_eq!(c.arrow, arrow);
+            let before = c.to.point(&a.rectangles[1]);
+            key(&mut a, KeyCode::Enter);
+            key(&mut a, KeyCode::Char('d'));
+            assert_eq!(c.to.point(&a.rectangles[1]), (before.0 + 1.0, before.1));
+            key(&mut a, KeyCode::Char('q'));
+            assert_eq!(c.to.point(&a.rectangles[1]), before);
+            assert_eq!(
+                App::load(a.path.clone(), a.size).unwrap().rectangles,
+                a.rectangles
+            );
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| ui(f, &a)).unwrap();
+            assert_eq!(terminal.backend().buffer()[(20, 10)].symbol(), "─");
+            if arrow {
+                assert_eq!(terminal.backend().buffer()[(28, 10)].symbol(), "▶");
+            }
+            key(&mut a, KeyCode::Enter);
+            key(&mut a, KeyCode::Backspace);
+            assert!(a.rectangles[0].connections.is_empty());
+            fs::remove_file(a.path).unwrap();
+        }
+    }
+    #[test]
+    fn connection_requires_distinct_boundaries_and_cancels() {
+        let mut a = app();
+        a.cursor = (10.0, 10.0);
+        ctrl(&mut a, 'd');
+        a.cursor = (15.0, 15.0);
+        key(&mut a, KeyCode::Enter);
+        a.cursor = (12.0, 12.0);
+        key(&mut a, KeyCode::Char('l'));
+        assert!(matches!(a.mode, Mode::Normal));
+        a.cursor = (10.0, 12.0);
+        key(&mut a, KeyCode::Char('l'));
+        key(&mut a, KeyCode::Enter);
+        assert!(matches!(a.mode, Mode::Connecting { .. }));
+        key(&mut a, KeyCode::Char('q'));
+        assert!(a.rectangles[0].connections.is_empty());
+        key(&mut a, KeyCode::Char('k'));
+        ctrl(&mut a, 'q');
+        assert!(a.quit);
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn connection_indices_remap_and_anchors_resize() {
+        let mut a = connected(true);
+        a.cursor = (50.0, 10.0);
+        draw(&mut a);
+        let mut c = a.rectangles[0].connections[0].clone();
+        c.target = 2;
+        a.rectangles[0].connections.push(c);
+        a.cursor = (29.0, 10.0);
+        key(&mut a, KeyCode::Enter);
+        key(&mut a, KeyCode::Backspace);
+        assert_eq!(a.rectangles[0].connections.len(), 1);
+        assert_eq!(a.rectangles[0].connections[0].target, 1);
+        let anchor = Anchor::at(&a.rectangles[0], (10.0, 10.0)).unwrap();
+        a.rectangles[0].width += 10.0;
+        assert_eq!(anchor.point(&a.rectangles[0]), (20.0, 10.0));
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn invalid_connection_is_rejected_without_overwrite() {
+        let a = app();
+        let data = r#"[{"x":0,"y":0,"z":0,"width":2,"height":2,"connections":[{"target":9,"from":{"side":"left","offset":0},"to":{"side":"right","offset":0},"arrow":true}]}]"#;
+        fs::write(&a.path, data).unwrap();
+        assert!(App::load(a.path.clone(), a.size).is_err());
+        assert_eq!(fs::read_to_string(&a.path).unwrap(), data);
+        fs::remove_file(a.path).unwrap();
     }
     #[test]
     fn invalid_file_is_preserved() {
