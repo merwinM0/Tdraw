@@ -1,4 +1,4 @@
-use super::Rectangle;
+use crate::model::Rectangle;
 use ratatui::{
     Frame,
     style::{Color, Style},
@@ -120,31 +120,7 @@ pub fn contains(source: &Rectangle, target: &Rectangle, c: &Connection, point: P
     .any(|pair| on_segment(point, pair[0], pair[1]))
 }
 
-// Orthogonal segments are clipped by iterating the viewport, never world-sized ranges.
-fn segment(f: &mut Frame, a: Point, b: Point, color: Color) {
-    let area = f.area();
-    for y in area.y..area.bottom() {
-        for x in area.x..area.right() {
-            let p = (x as f64, y as f64);
-            let horizontal = a.1 == b.1 && p.1 == a.1 && p.0 >= a.0.min(b.0) && p.0 <= a.0.max(b.0);
-            let vertical = a.0 == b.0 && p.0 == a.0 && p.1 >= a.1.min(b.1) && p.1 <= a.1.max(b.1);
-            if on_segment(p, a, b) {
-                let cell = &mut f.buffer_mut()[(x, y)];
-                let symbol = if (horizontal && cell.symbol() == "│")
-                    || (vertical && cell.symbol() == "─")
-                {
-                    "┼"
-                } else if horizontal {
-                    "─"
-                } else {
-                    "│"
-                };
-                cell.set_symbol(symbol)
-                    .set_style(Style::default().fg(color));
-            }
-        }
-    }
-}
+mod render;
 
 pub fn draw(
     f: &mut Frame,
@@ -163,9 +139,7 @@ pub fn draw(
         .copied()
         .find(|p| *p != target)
         .unwrap_or(target);
-    for pair in points.windows(2) {
-        segment(f, pair[0], pair[1], color);
-    }
+    render::path(f, &points, color);
     if arrow {
         // Arrowhead sits just outside the target border, pointing into the box.
         let tip = if to.is_some() { b } else { target };
