@@ -77,6 +77,7 @@ enum Mode {
         source: usize,
         anchor: Anchor,
         arrow: bool,
+        waypoints: Vec<(f64, f64)>,
     },
     Drawing {
         anchor: (f64, f64),
@@ -126,7 +127,13 @@ impl App {
         }
         if rectangles.iter().enumerate().any(|(i, r)| {
             r.connections.iter().any(|c| {
-                c.target >= rectangles.len() || c.target == i || !c.from.valid() || !c.to.valid()
+                c.target >= rectangles.len()
+                    || c.target == i
+                    || !c.from.valid()
+                    || !c.to.valid()
+                    || c.waypoints
+                        .iter()
+                        .any(|(x, y)| !x.is_finite() || !y.is_finite() || *x < 0.0 || *y < 0.0)
             })
         }) {
             return Err(io::Error::new(
@@ -368,7 +375,8 @@ impl App {
             source,
             anchor,
             arrow,
-        } = self.mode
+            mut waypoints,
+        } = self.mode.clone()
         {
             if key.code == KeyCode::Enter
                 || key.code == KeyCode::Char(if arrow { 'k' } else { 'l' })
@@ -379,10 +387,23 @@ impl App {
                         from: anchor,
                         to,
                         arrow,
+                        waypoints,
                     });
                     self.commit();
+                } else if key.code != KeyCode::Enter {
+                    if waypoints.last().copied() != Some(self.cursor) {
+                        waypoints.push(self.cursor);
+                    }
+                    self.message =
+                        format!("已记录 {} 个中间点 · 继续移动并确认终点", waypoints.len());
+                    self.mode = Mode::Connecting {
+                        source,
+                        anchor,
+                        arrow,
+                        waypoints,
+                    };
                 } else {
-                    self.message = "请将光标移至另一个方框的可见边界".into();
+                    self.message = "请移至另一方框边界确认，或按 L/K 记录中间点".into();
                 }
             }
             return;
@@ -394,6 +415,7 @@ impl App {
                         source,
                         anchor,
                         arrow: c == 'k',
+                        waypoints: Vec::new(),
                     };
                     self.message = "已固定起点 · 移至另一个方框边界确认".into();
                 } else {
@@ -566,6 +588,7 @@ fn ui(f: &mut Frame, app: &App) {
                 Some(c.to),
                 c.arrow,
                 color,
+                &c.waypoints,
             );
         }
     }
@@ -573,6 +596,7 @@ fn ui(f: &mut Frame, app: &App) {
         source,
         anchor,
         arrow,
+        ref waypoints,
     } = app.mode
     {
         let target = app.boundary().filter(|(i, _)| *i != source);
@@ -583,7 +607,16 @@ fn ui(f: &mut Frame, app: &App) {
             target.map(|(_, a)| a),
             arrow,
             PURPLE,
+            waypoints,
         );
+        for &(x, y) in waypoints {
+            if x < area.width as f64 && y < area.height as f64 {
+                f.render_widget(
+                    Paragraph::new("◆").style(Style::default().fg(PURPLE)),
+                    Rect::new(x as u16, y as u16, 1, 1),
+                );
+            }
+        }
     }
     let selected = match app.mode {
         Mode::Connecting { source, .. } => Some(source),
@@ -627,7 +660,11 @@ fn ui(f: &mut Frame, app: &App) {
         ),
         Mode::Connecting { arrow, .. } => (
             if arrow { "箭头" } else { "连线" },
-            "WASD 移动 · 另一方框边界 Enter 确认 · Q 取消",
+            if arrow {
+                "WASD 移动 · K 中间点/终点 · Enter 终点 · Q 取消"
+            } else {
+                "WASD 移动 · L 中间点/终点 · Enter 终点 · Q 取消"
+            },
         ),
         Mode::Drawing { .. } => (
             "矩形",
@@ -1077,6 +1114,83 @@ mod tests {
         a.rectangles.push(blocker);
         a.cursor = (20.0, 10.0);
         assert_eq!(a.hovered_connection(), None);
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn waypoints_preview_save_select_and_delete() {
+        for arrow in [false, true] {
+            let mut a = connected(arrow);
+            a.rectangles[0].connections.clear();
+            a.save();
+            let trigger = KeyCode::Char(if arrow { 'k' } else { 'l' });
+            a.cursor = (10.0, 10.0);
+            key(&mut a, trigger);
+            a.cursor = (18.0, 16.0);
+            key(&mut a, trigger);
+            key(&mut a, trigger);
+            a.cursor = (25.0, 16.0);
+            key(&mut a, trigger);
+            assert!(matches!(&a.mode, Mode::Connecting { waypoints, .. } if waypoints.len() == 2));
+            assert!(
+                App::load(a.path.clone(), a.size).unwrap().rectangles[0]
+                    .connections
+                    .is_empty()
+            );
+            a.cursor = (28.0, 12.0);
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| ui(f, &a)).unwrap();
+            assert_eq!(terminal.backend().buffer()[(18, 16)].symbol(), "◆");
+            assert_eq!(terminal.backend().buffer()[(22, 16)].symbol(), "─");
+            a.cursor = (29.0, 10.0);
+            key(&mut a, trigger);
+            let c = &a.rectangles[0].connections[0];
+            assert_eq!(c.waypoints, vec![(18.0, 16.0), (25.0, 16.0)]);
+            assert_eq!(
+                App::load(a.path.clone(), a.size).unwrap().rectangles,
+                a.rectangles
+            );
+            // Moving an endpoint preserves absolute waypoint positions.
+            key(&mut a, KeyCode::Enter);
+            key(&mut a, KeyCode::Char('d'));
+            key(&mut a, KeyCode::Enter);
+            assert_eq!(
+                a.rectangles[0].connections[0].waypoints,
+                vec![(18.0, 16.0), (25.0, 16.0)]
+            );
+            a.cursor = (22.0, 16.0);
+            assert_eq!(a.hovered_connection(), Some((0, 0)));
+            key(&mut a, KeyCode::Enter);
+            key(&mut a, KeyCode::Delete);
+            assert!(a.rectangles[0].connections.is_empty());
+            fs::remove_file(a.path).unwrap();
+        }
+    }
+    #[test]
+    fn waypoints_cancel_enter_and_legacy_compatibility() {
+        let mut a = connected(false);
+        let before = a.rectangles.clone();
+        a.cursor = (10.0, 10.0);
+        key(&mut a, KeyCode::Char('l'));
+        a.cursor = (20.0, 16.0);
+        key(&mut a, KeyCode::Enter);
+        assert!(matches!(&a.mode, Mode::Connecting { waypoints, .. } if waypoints.is_empty()));
+        key(&mut a, KeyCode::Char('k')); // Wrong tool key does not add a point.
+        assert!(matches!(&a.mode, Mode::Connecting { waypoints, .. } if waypoints.is_empty()));
+        key(&mut a, KeyCode::Char('l'));
+        key(&mut a, KeyCode::Char('q'));
+        assert_eq!(a.rectangles, before);
+        a.cursor = (10.0, 10.0);
+        key(&mut a, KeyCode::Char('k'));
+        a.cursor = (20.0, 16.0);
+        key(&mut a, KeyCode::Char('k'));
+        ctrl(&mut a, 'q');
+        assert!(a.quit);
+        assert_eq!(a.rectangles, before);
+        let old: Connection = serde_json::from_str(r#"{"target":1,"from":{"side":"right","offset":0},"to":{"side":"left","offset":0},"arrow":false}"#).unwrap();
+        assert!(old.waypoints.is_empty());
+        a.rectangles[0].connections[0].waypoints = vec![(-1.0, 2.0)];
+        a.save();
+        assert!(App::load(a.path.clone(), a.size).is_err());
         fs::remove_file(a.path).unwrap();
     }
     #[test]

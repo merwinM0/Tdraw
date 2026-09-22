@@ -74,20 +74,34 @@ pub struct Connection {
     pub from: Anchor,
     pub to: Anchor,
     pub arrow: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waypoints: Vec<(f64, f64)>,
 }
 
 type Point = (f64, f64);
 
 // Shared geometry keeps hit testing identical to the rendered path, including arrow tips.
-fn route(source: (&Rectangle, Anchor), target: Point, to: Option<Anchor>) -> [Point; 5] {
+fn route(
+    source: (&Rectangle, Anchor),
+    target: Point,
+    to: Option<Anchor>,
+    waypoints: &[Point],
+) -> Vec<Point> {
     let start = source.1.point(source.0);
     let a = source.1.outward(start);
     let b = to.map_or(target, |anchor| anchor.outward(target));
-    let mid = match source.1.side {
-        Side::Left | Side::Right => (b.0, a.1),
-        Side::Top | Side::Bottom => (a.0, b.1),
-    };
-    [start, a, mid, b, target]
+    let mut points = vec![start, a];
+    let mut previous = a;
+    for next in waypoints.iter().copied().chain(std::iter::once(b)) {
+        let mid = match source.1.side {
+            Side::Left | Side::Right => (next.0, previous.1),
+            Side::Top | Side::Bottom => (previous.0, next.1),
+        };
+        points.extend([mid, next]);
+        previous = next;
+    }
+    points.push(target);
+    points
 }
 
 fn on_segment(p: Point, a: Point, b: Point) -> bool {
@@ -96,9 +110,14 @@ fn on_segment(p: Point, a: Point, b: Point) -> bool {
 }
 
 pub fn contains(source: &Rectangle, target: &Rectangle, c: &Connection, point: Point) -> bool {
-    route((source, c.from), c.to.point(target), Some(c.to))
-        .windows(2)
-        .any(|pair| on_segment(point, pair[0], pair[1]))
+    route(
+        (source, c.from),
+        c.to.point(target),
+        Some(c.to),
+        &c.waypoints,
+    )
+    .windows(2)
+    .any(|pair| on_segment(point, pair[0], pair[1]))
 }
 
 // Orthogonal segments are clipped by iterating the viewport, never world-sized ranges.
@@ -134,10 +153,16 @@ pub fn draw(
     to: Option<Anchor>,
     arrow: bool,
     color: Color,
+    waypoints: &[Point],
 ) {
-    let points = route(source, target, to);
-    let start = points[0];
-    let b = points[3];
+    let points = route(source, target, to, waypoints);
+    let b = points[points.len() - 2];
+    let previous = points
+        .iter()
+        .rev()
+        .copied()
+        .find(|p| *p != target)
+        .unwrap_or(target);
     for pair in points.windows(2) {
         segment(f, pair[0], pair[1], color);
     }
@@ -149,7 +174,9 @@ pub fn draw(
             Some(Side::Right) => "◀",
             Some(Side::Top) => "▼",
             Some(Side::Bottom) => "▲",
-            None if target.0 > start.0 => "▶",
+            None if target.1 > previous.1 => "▼",
+            None if target.1 < previous.1 => "▲",
+            None if target.0 > previous.0 => "▶",
             None => "◀",
         };
         let area = f.area();
