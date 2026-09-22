@@ -1,5 +1,8 @@
-use super::{INK, PURPLE, Rectangle};
-use ratatui::{Frame, style::Style};
+use super::Rectangle;
+use ratatui::{
+    Frame,
+    style::{Color, Style},
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -73,15 +76,40 @@ pub struct Connection {
     pub arrow: bool,
 }
 
+type Point = (f64, f64);
+
+// Shared geometry keeps hit testing identical to the rendered path, including arrow tips.
+fn route(source: (&Rectangle, Anchor), target: Point, to: Option<Anchor>) -> [Point; 5] {
+    let start = source.1.point(source.0);
+    let a = source.1.outward(start);
+    let b = to.map_or(target, |anchor| anchor.outward(target));
+    let mid = match source.1.side {
+        Side::Left | Side::Right => (b.0, a.1),
+        Side::Top | Side::Bottom => (a.0, b.1),
+    };
+    [start, a, mid, b, target]
+}
+
+fn on_segment(p: Point, a: Point, b: Point) -> bool {
+    (a.1 == b.1 && p.1 == a.1 && p.0 >= a.0.min(b.0) && p.0 <= a.0.max(b.0))
+        || (a.0 == b.0 && p.0 == a.0 && p.1 >= a.1.min(b.1) && p.1 <= a.1.max(b.1))
+}
+
+pub fn contains(source: &Rectangle, target: &Rectangle, c: &Connection, point: Point) -> bool {
+    route((source, c.from), c.to.point(target), Some(c.to))
+        .windows(2)
+        .any(|pair| on_segment(point, pair[0], pair[1]))
+}
+
 // Orthogonal segments are clipped by iterating the viewport, never world-sized ranges.
-fn segment(f: &mut Frame, a: (f64, f64), b: (f64, f64), preview: bool) {
+fn segment(f: &mut Frame, a: Point, b: Point, color: Color) {
     let area = f.area();
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
             let p = (x as f64, y as f64);
             let horizontal = a.1 == b.1 && p.1 == a.1 && p.0 >= a.0.min(b.0) && p.0 <= a.0.max(b.0);
             let vertical = a.0 == b.0 && p.0 == a.0 && p.1 >= a.1.min(b.1) && p.1 <= a.1.max(b.1);
-            if horizontal || vertical {
+            if on_segment(p, a, b) {
                 let cell = &mut f.buffer_mut()[(x, y)];
                 let symbol = if (horizontal && cell.symbol() == "│")
                     || (vertical && cell.symbol() == "─")
@@ -93,7 +121,7 @@ fn segment(f: &mut Frame, a: (f64, f64), b: (f64, f64), preview: bool) {
                     "│"
                 };
                 cell.set_symbol(symbol)
-                    .set_style(Style::default().fg(if preview { PURPLE } else { INK }));
+                    .set_style(Style::default().fg(color));
             }
         }
     }
@@ -105,17 +133,13 @@ pub fn draw(
     target: (f64, f64),
     to: Option<Anchor>,
     arrow: bool,
-    preview: bool,
+    color: Color,
 ) {
-    let start = source.1.point(source.0);
-    let a = source.1.outward(start);
-    let b = to.map_or(target, |anchor| anchor.outward(target));
-    let mid = match source.1.side {
-        Side::Left | Side::Right => (b.0, a.1),
-        Side::Top | Side::Bottom => (a.0, b.1),
-    };
-    for (p, q) in [(start, a), (a, mid), (mid, b), (b, target)] {
-        segment(f, p, q, preview);
+    let points = route(source, target, to);
+    let start = points[0];
+    let b = points[3];
+    for pair in points.windows(2) {
+        segment(f, pair[0], pair[1], color);
     }
     if arrow {
         // Arrowhead sits just outside the target border, pointing into the box.
@@ -136,7 +160,7 @@ pub fn draw(
         {
             f.buffer_mut()[(tip.0 as u16, tip.1 as u16)]
                 .set_symbol(symbol)
-                .set_style(Style::default().fg(if preview { PURPLE } else { INK }));
+                .set_style(Style::default().fg(color));
         }
     }
 }

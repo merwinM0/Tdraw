@@ -69,6 +69,10 @@ impl Rectangle {
 #[derive(Debug, Clone)]
 enum Mode {
     Normal,
+    SelectedConnection {
+        source: usize,
+        index: usize,
+    },
     Connecting {
         source: usize,
         anchor: Anchor,
@@ -176,6 +180,28 @@ impl App {
             .filter(|(_, r)| r.contains(self.cursor.0, self.cursor.1))
             .max_by(|(ai, a), (bi, b)| a.z.total_cmp(&b.z).then(ai.cmp(bi)))
             .map(|(i, _)| i)
+    }
+
+    fn hovered_connection(&self) -> Option<(usize, usize)> {
+        // Boxes are opaque and rendered above connections; prefer them at shared endpoints.
+        if self.hovered().is_some() {
+            return None;
+        }
+        // Reverse the drawing order so the visible topmost connection wins at crossings.
+        self.rectangles
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(source, r)| {
+                r.connections
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, c)| {
+                        connection::contains(r, &self.rectangles[c.target], c, self.cursor)
+                            .then_some((source, index))
+                    })
+            })
     }
 
     fn boundary(&self) -> Option<(usize, Anchor)> {
@@ -381,8 +407,15 @@ impl App {
                         original: self.rectangles[index].clone(),
                         cursor: self.cursor,
                     };
+                } else if let Some((source, index)) = self.hovered_connection() {
+                    self.mode = Mode::SelectedConnection { source, index };
                 }
             }
+            (KeyCode::Backspace | KeyCode::Delete, Mode::SelectedConnection { source, index }) => {
+                self.rectangles[source].connections.remove(index);
+                self.commit();
+            }
+            (KeyCode::Enter, Mode::SelectedConnection { .. }) => self.mode = Mode::Normal,
             (KeyCode::Enter, Mode::Drawing { anchor }) => {
                 self.rectangles.push(self.preview(anchor));
                 self.commit();
@@ -511,15 +544,28 @@ fn ui(f: &mut Frame, app: &App) {
         Block::default().style(Style::default().bg(Color::White).fg(INK)),
         area,
     );
-    for r in &app.rectangles {
-        for c in &r.connections {
+    let hovered_connection = if matches!(app.mode, Mode::Normal) {
+        app.hovered_connection()
+    } else {
+        None
+    };
+    for (source, r) in app.rectangles.iter().enumerate() {
+        for (index, c) in r.connections.iter().enumerate() {
+            let color = if matches!(app.mode, Mode::SelectedConnection { source: s, index: i } if s == source && i == index)
+            {
+                PURPLE
+            } else if hovered_connection == Some((source, index)) {
+                Color::Blue
+            } else {
+                INK
+            };
             connection::draw(
                 f,
                 (r, c.from),
                 c.to.point(&app.rectangles[c.target]),
                 Some(c.to),
                 c.arrow,
-                false,
+                color,
             );
         }
     }
@@ -536,7 +582,7 @@ fn ui(f: &mut Frame, app: &App) {
             app.cursor,
             target.map(|(_, a)| a),
             arrow,
-            true,
+            PURPLE,
         );
     }
     let selected = match app.mode {
@@ -574,6 +620,10 @@ fn ui(f: &mut Frame, app: &App) {
         Mode::Normal => (
             "选择",
             "WASD 移动 · Ctrl+D 矩形 · L 连线 · K 箭头 · Enter 选择 · Ctrl+Q 退出",
+        ),
+        Mode::SelectedConnection { .. } => (
+            "连接已选中",
+            "Backspace/Delete 删除连接 · Q/Esc/Enter 取消选择 · WASD 移动光标",
         ),
         Mode::Connecting { arrow, .. } => (
             if arrow { "箭头" } else { "连线" },
@@ -945,6 +995,88 @@ mod tests {
         let anchor = Anchor::at(&a.rectangles[0], (10.0, 10.0)).unwrap();
         a.rectangles[0].width += 10.0;
         assert_eq!(anchor.point(&a.rectangles[0]), (20.0, 10.0));
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn select_delete_connections_preserves_boxes_and_other_links() {
+        for arrow in [false, true] {
+            for delete in [KeyCode::Backspace, KeyCode::Delete] {
+                let mut a = connected(arrow);
+                let mut other = a.rectangles[0].connections[0].clone();
+                other.arrow = !arrow;
+                a.rectangles[0].connections.insert(0, other.clone());
+                let before = a.rectangles.clone();
+                a.cursor = (20.0, 10.0);
+                assert_eq!(a.hovered_connection(), Some((0, 1)));
+                key(&mut a, KeyCode::Enter);
+                assert!(matches!(
+                    a.mode,
+                    Mode::SelectedConnection {
+                        source: 0,
+                        index: 1
+                    }
+                ));
+                key(&mut a, KeyCode::Char('s'));
+                assert_eq!(a.rectangles, before);
+                key(&mut a, delete);
+                let mut expected = before;
+                expected[0].connections.pop();
+                assert_eq!(a.rectangles, expected);
+                assert!(matches!(a.mode, Mode::Normal));
+                assert_eq!(
+                    App::load(a.path.clone(), a.size).unwrap().rectangles,
+                    expected
+                );
+                fs::remove_file(a.path).unwrap();
+            }
+        }
+    }
+    #[test]
+    fn connection_hover_selection_cancel_and_arrow_tip() {
+        let mut a = connected(true);
+        let before = a.rectangles.clone();
+        a.cursor = (28.0, 10.0); // Arrowhead is selectable too.
+        assert_eq!(a.hovered_connection(), Some((0, 0)));
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| ui(f, &a)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(20, 10)].fg, Color::Blue);
+        for cancel in [KeyCode::Char('q'), KeyCode::Esc, KeyCode::Enter] {
+            key(&mut a, KeyCode::Enter);
+            terminal.draw(|f| ui(f, &a)).unwrap();
+            assert_eq!(terminal.backend().buffer()[(20, 10)].fg, PURPLE);
+            key(&mut a, cancel);
+            assert!(matches!(a.mode, Mode::Normal));
+            assert_eq!(a.rectangles, before);
+        }
+        key(&mut a, KeyCode::Enter);
+        ctrl(&mut a, 'q');
+        assert!(a.quit);
+        assert_eq!(a.rectangles, before);
+        fs::remove_file(a.path).unwrap();
+    }
+    #[test]
+    fn connection_hit_testing_respects_bends_occlusion_and_moves() {
+        let mut a = connected(true);
+        a.rectangles[1].y += 5.0;
+        a.cursor = (28.0, 12.0);
+        assert_eq!(a.hovered_connection(), Some((0, 0)));
+        a.cursor = (28.0, 10.0);
+        assert_eq!(a.hovered_connection(), Some((0, 0)));
+        a.cursor = (20.0, 11.0);
+        assert_eq!(a.hovered_connection(), None);
+        a.cursor = (10.0, 10.0);
+        assert_eq!(a.hovered_connection(), None);
+        key(&mut a, KeyCode::Enter);
+        assert!(matches!(a.mode, Mode::Moving { .. }));
+        key(&mut a, KeyCode::Char('q'));
+        let mut blocker = a.preview((19.0, 9.0));
+        blocker.x = 19.0;
+        blocker.y = 9.0;
+        blocker.width = 4.0;
+        blocker.height = 4.0;
+        a.rectangles.push(blocker);
+        a.cursor = (20.0, 10.0);
+        assert_eq!(a.hovered_connection(), None);
         fs::remove_file(a.path).unwrap();
     }
     #[test]
