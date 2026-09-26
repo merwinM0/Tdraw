@@ -5,7 +5,7 @@ mod tests;
 use crate::storage;
 use crate::{
     connection::{self, Anchor},
-    model::Rectangle,
+    model::{Shape, ShapeKind},
 };
 use std::{io, path::PathBuf};
 
@@ -24,28 +24,29 @@ pub(crate) enum Mode {
     },
     Drawing {
         anchor: (f64, f64),
+        shape: ShapeKind,
     },
     Moving {
         index: usize,
-        original: Rectangle,
+        original: Shape,
         cursor: (f64, f64),
     },
     Editing {
         index: usize,
-        original: Rectangle,
+        original: Shape,
         cursor: (f64, f64),
-        before_edit: Rectangle,
+        before_edit: Shape,
     },
     Menu {
         index: usize,
-        original: Rectangle,
+        original: Shape,
         cursor: (f64, f64),
         item: usize,
     },
 }
 
 pub(crate) struct App {
-    pub(crate) rectangles: Vec<Rectangle>,
+    pub(crate) rectangles: Vec<Shape>,
     pub(crate) cursor: (f64, f64),
     pub(crate) size: (u16, u16),
     pub(crate) mode: Mode,
@@ -129,8 +130,13 @@ impl App {
         Anchor::at(&self.rectangles[index], self.cursor).map(|anchor| (index, anchor))
     }
 
-    pub(crate) fn preview(&self, anchor: (f64, f64)) -> Rectangle {
-        Rectangle {
+    pub(crate) fn preview(&self, anchor: (f64, f64)) -> Shape {
+        Shape {
+            shape: if let Mode::Drawing { shape, .. } = self.mode {
+                shape
+            } else {
+                ShapeKind::Rectangle
+            },
             text: String::new(),
             connections: Vec::new(),
             x: anchor.0.min(self.cursor.0),

@@ -127,7 +127,7 @@ fn connection_hover_selection_cancel_and_arrow_tip() {
 }
 #[test]
 fn connection_hit_testing_respects_bends_occlusion_and_moves() {
-    let mut a = connected(true);
+    let mut a = connected(false);
     a.rectangles[1].y += 5.0;
     a.cursor = (28.0, 12.0);
     assert_eq!(a.hovered_connection(), Some((0, 0)));

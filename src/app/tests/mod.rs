@@ -1,5 +1,6 @@
 mod connections;
 mod core;
+mod shapes;
 mod waypoints;
 
 use crate::{

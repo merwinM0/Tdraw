@@ -1,14 +1,14 @@
 //! Backward-compatible JSON validation and atomic replacement of the canvas file.
-use crate::model::Rectangle;
+use crate::model::Shape;
 use std::{fs, io, path::Path};
 
-pub(crate) fn load(path: &Path) -> io::Result<Vec<Rectangle>> {
-    let rectangles: Vec<Rectangle> = match fs::read_to_string(path) {
+pub(crate) fn load(path: &Path) -> io::Result<Vec<Shape>> {
+    let rectangles: Vec<Shape> = match fs::read_to_string(path) {
         Ok(data) => serde_json::from_str(&data).map_err(io::Error::other)?,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e),
     };
-    if !rectangles.iter().all(Rectangle::valid) {
+    if !rectangles.iter().all(Shape::valid) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "rects.json 包含无效坐标或尺寸",
@@ -33,7 +33,7 @@ pub(crate) fn load(path: &Path) -> io::Result<Vec<Rectangle>> {
     Ok(rectangles)
 }
 
-pub(crate) fn save(path: &Path, rectangles: &[Rectangle]) -> io::Result<()> {
+pub(crate) fn save(path: &Path, rectangles: &[Shape]) -> io::Result<()> {
     let data = serde_json::to_vec_pretty(rectangles).map_err(io::Error::other)?;
     let temp = path.with_extension("json.tmp");
     fs::write(&temp, data)?;

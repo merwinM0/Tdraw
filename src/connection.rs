@@ -1,72 +1,12 @@
-use crate::model::Rectangle;
+use crate::model::Shape;
 use ratatui::{
     Frame,
     style::{Color, Style},
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Side {
-    Top,
-    Bottom,
-    Left,
-    Right,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Anchor {
-    pub side: Side,
-    pub offset: f64,
-}
-
-impl Anchor {
-    pub fn at(r: &Rectangle, cursor: (f64, f64)) -> Option<Self> {
-        let (x, y) = cursor;
-        let left = r.x.floor();
-        let top = r.y.floor();
-        let w = (r.width.floor() - 1.0).max(0.0);
-        let h = (r.height.floor() - 1.0).max(0.0);
-        if x < left || x > left + w || y < top || y > top + h {
-            return None;
-        }
-        let (side, offset) = if x == left {
-            (Side::Left, (y - top) / h.max(1.0))
-        } else if x == left + w {
-            (Side::Right, (y - top) / h.max(1.0))
-        } else if y == top {
-            (Side::Top, (x - left) / w.max(1.0))
-        } else if y == top + h {
-            (Side::Bottom, (x - left) / w.max(1.0))
-        } else {
-            return None;
-        };
-        Some(Self { side, offset })
-    }
-    pub fn valid(self) -> bool {
-        self.offset.is_finite() && (0.0..=1.0).contains(&self.offset)
-    }
-    pub fn point(self, r: &Rectangle) -> (f64, f64) {
-        let w = (r.width.floor() - 1.0).max(0.0);
-        let h = (r.height.floor() - 1.0).max(0.0);
-        let (x, y) = match self.side {
-            Side::Top => ((w * self.offset).round(), 0.0),
-            Side::Bottom => ((w * self.offset).round(), h),
-            Side::Left => (0.0, (h * self.offset).round()),
-            Side::Right => (w, (h * self.offset).round()),
-        };
-        (r.x.floor() + x, r.y.floor() + y)
-    }
-    fn outward(self, point: (f64, f64)) -> (f64, f64) {
-        let (x, y) = point;
-        match self.side {
-            Side::Top => (x, y - 1.0),
-            Side::Bottom => (x, y + 1.0),
-            Side::Left => (x - 1.0, y),
-            Side::Right => (x + 1.0, y),
-        }
-    }
-}
+mod anchor;
+pub use anchor::{Anchor, Side};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Connection {
@@ -78,21 +18,42 @@ pub struct Connection {
     pub waypoints: Vec<(f64, f64)>,
 }
 
+impl Connection {
+    /// Arrows attach to the sides facing the adjacent route point. Plain lines
+    /// retain their user-selected anchors. Stored anchors remain backward compatible.
+    pub fn anchors(&self, source: &Shape, target: &Shape) -> (Anchor, Anchor) {
+        if !self.arrow {
+            return (self.from, self.to);
+        }
+        (
+            Anchor::facing(
+                source,
+                self.waypoints.first().copied().unwrap_or(target.center()),
+            ),
+            Anchor::facing(
+                target,
+                self.waypoints.last().copied().unwrap_or(source.center()),
+            ),
+        )
+    }
+}
+
 type Point = (f64, f64);
 
 // Shared geometry keeps hit testing identical to the rendered path, including arrow tips.
 fn route(
-    source: (&Rectangle, Anchor),
+    source: (&Shape, Anchor),
     target: Point,
     to: Option<Anchor>,
     waypoints: &[Point],
+    arrow: bool,
 ) -> Vec<Point> {
     let start = source.1.point(source.0);
     let a = source.1.outward(start);
     let b = to.map_or(target, |anchor| anchor.outward(target));
     let mut points = vec![start, a];
     let mut previous = a;
-    for next in waypoints.iter().copied().chain(std::iter::once(b)) {
+    for next in waypoints.iter().copied() {
         let mid = match source.1.side {
             Side::Left | Side::Right => (next.0, previous.1),
             Side::Top | Side::Bottom => (previous.0, next.1),
@@ -100,7 +61,32 @@ fn route(
         points.extend([mid, next]);
         previous = next;
     }
-    points.push(target);
+    if arrow && let Some(to) = to {
+        let horizontal_start = matches!(source.1.side, Side::Left | Side::Right);
+        let horizontal_end = matches!(to.side, Side::Left | Side::Right);
+        if waypoints.is_empty() && horizontal_start == horizontal_end {
+            if horizontal_start {
+                let mx = ((previous.0 + b.0) / 2.0).round();
+                points.extend([(mx, previous.1), (mx, b.1)]);
+            } else {
+                let my = ((previous.1 + b.1) / 2.0).round();
+                points.extend([(previous.0, my), (b.0, my)]);
+            }
+        } else {
+            // Approach perpendicular to the target normal before the final stub.
+            points.push(if horizontal_end {
+                (b.0, previous.1)
+            } else {
+                (previous.0, b.1)
+            });
+        }
+    } else {
+        points.push(match source.1.side {
+            Side::Left | Side::Right => (b.0, previous.1),
+            Side::Top | Side::Bottom => (previous.0, b.1),
+        });
+    }
+    points.extend([b, target]);
     points
 }
 
@@ -109,12 +95,14 @@ fn on_segment(p: Point, a: Point, b: Point) -> bool {
         || (a.0 == b.0 && p.0 == a.0 && p.1 >= a.1.min(b.1) && p.1 <= a.1.max(b.1))
 }
 
-pub fn contains(source: &Rectangle, target: &Rectangle, c: &Connection, point: Point) -> bool {
+pub fn contains(source: &Shape, target: &Shape, c: &Connection, point: Point) -> bool {
+    let (from, to) = c.anchors(source, target);
     route(
-        (source, c.from),
-        c.to.point(target),
-        Some(c.to),
+        (source, from),
+        to.point(target),
+        Some(to),
         &c.waypoints,
+        c.arrow,
     )
     .windows(2)
     .any(|pair| on_segment(point, pair[0], pair[1]))
@@ -124,14 +112,14 @@ mod render;
 
 pub fn draw(
     f: &mut Frame,
-    source: (&Rectangle, Anchor),
+    source: (&Shape, Anchor),
     target: (f64, f64),
     to: Option<Anchor>,
     arrow: bool,
     color: Color,
     waypoints: &[Point],
 ) {
-    let points = route(source, target, to, waypoints);
+    let points = route(source, target, to, waypoints, arrow);
     let b = points[points.len() - 2];
     let previous = points
         .iter()

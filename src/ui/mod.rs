@@ -1,8 +1,10 @@
+mod shapes;
+use shapes::{draw_shape, draw_text};
 pub(crate) mod theme;
 use crate::{
     app::{App, Mode},
     connection,
-    model::Rectangle,
+    model::ShapeKind,
 };
 use ratatui::{
     Frame,
@@ -12,61 +14,6 @@ use ratatui::{
 };
 use theme::{INK, ITEMS, PURPLE, SOFT};
 use unicode_width::UnicodeWidthStr;
-
-// Draw only visible cells: clipping must not manufacture borders at viewport edges.
-fn draw_rectangle(f: &mut Frame, r: &Rectangle, color: Color) {
-    let area = f.area();
-    let left = r.x.floor();
-    let top = r.y.floor();
-    let right = left + r.width.floor() - 1.0;
-    let bottom = top + r.height.floor() - 1.0;
-    for y in area.y..area.bottom() {
-        for x in area.x..area.right() {
-            let px = x as f64;
-            let py = y as f64;
-            if px < left || px > right || py < top || py > bottom {
-                continue;
-            }
-            let symbol = if py == top && px == left {
-                "┌"
-            } else if py == top && px == right {
-                "┐"
-            } else if py == bottom && px == left {
-                "└"
-            } else if py == bottom && px == right {
-                "┘"
-            } else if py == top || py == bottom {
-                "─"
-            } else if px == left || px == right {
-                "│"
-            } else {
-                " "
-            };
-            f.buffer_mut()[(x, y)]
-                .set_symbol(symbol)
-                .set_style(Style::default().fg(color).bg(Color::White));
-        }
-    }
-}
-
-fn draw_text(f: &mut Frame, r: &Rectangle) {
-    let area = f.area();
-    let left = r.x.floor() + 1.0;
-    let top = r.y.floor() + 1.0;
-    if left >= area.right() as f64 || top >= area.bottom() as f64 {
-        return;
-    }
-    let width = (r.width.floor() - 2.0)
-        .max(0.0)
-        .min(area.right() as f64 - left) as u16;
-    let height = (r.height.floor() - 2.0)
-        .max(0.0)
-        .min(area.bottom() as f64 - top) as u16;
-    f.render_widget(
-        Paragraph::new(r.text.as_str()).style(Style::default().fg(INK).bg(Color::White)),
-        Rect::new(left as u16, top as u16, width, height),
-    );
-}
 
 fn panel() -> Block<'static> {
     Block::default()
@@ -97,11 +44,13 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
             } else {
                 INK
             };
+            let target = &app.rectangles[c.target];
+            let (from, to) = c.anchors(r, target);
             connection::draw(
                 f,
-                (r, c.from),
-                c.to.point(&app.rectangles[c.target]),
-                Some(c.to),
+                (r, from),
+                to.point(target),
+                Some(to),
                 c.arrow,
                 color,
                 &c.waypoints,
@@ -116,11 +65,33 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
     } = app.mode
     {
         let target = app.boundary().filter(|(i, _)| *i != source);
+        let mut from = anchor;
+        let mut to = target.map(|(_, a)| a);
+        let mut endpoint = app.cursor;
+        if arrow {
+            from = connection::Anchor::facing(
+                &app.rectangles[source],
+                waypoints.first().copied().unwrap_or(app.cursor),
+            );
+            if let Some((index, _)) = target {
+                let c = connection::Connection {
+                    target: index,
+                    from: anchor,
+                    to: to.unwrap(),
+                    arrow,
+                    waypoints: waypoints.clone(),
+                };
+                let anchors = c.anchors(&app.rectangles[source], &app.rectangles[index]);
+                from = anchors.0;
+                to = Some(anchors.1);
+                endpoint = anchors.1.point(&app.rectangles[index]);
+            }
+        }
         connection::draw(
             f,
-            (&app.rectangles[source], anchor),
-            app.cursor,
-            target.map(|(_, a)| a),
+            (&app.rectangles[source], from),
+            endpoint,
+            to,
             arrow,
             PURPLE,
             waypoints,
@@ -149,7 +120,7 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
     let mut order: Vec<_> = app.rectangles.iter().enumerate().collect();
     order.sort_by(|(ai, a), (bi, b)| a.z.total_cmp(&b.z).then(ai.cmp(bi)));
     for (i, r) in order {
-        draw_rectangle(
+        draw_shape(
             f,
             r,
             if selected == Some(i) {
@@ -162,13 +133,13 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
         );
         draw_text(f, r);
     }
-    if let Mode::Drawing { anchor } = app.mode {
-        draw_rectangle(f, &app.preview(anchor), PURPLE);
+    if let Mode::Drawing { anchor, .. } = app.mode {
+        draw_shape(f, &app.preview(anchor), PURPLE);
     }
     let (mode, help) = match app.mode {
         Mode::Normal => (
             "选择",
-            "WASD 移动 · Ctrl+D 矩形 · L 连线 · K 箭头 · Enter 选择 · Ctrl+Q 退出",
+            "Ctrl+D 矩形 · Ctrl+W 圆形 · Ctrl+A 菱形 · L 连线 · K 箭头 · Enter 选择",
         ),
         Mode::SelectedConnection { .. } => (
             "连接已选中",
@@ -182,8 +153,12 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
                 "WASD 移动 · L 中间点/终点 · Enter 终点 · Q 取消"
             },
         ),
-        Mode::Drawing { .. } => (
-            "矩形",
+        Mode::Drawing { shape, .. } => (
+            match shape {
+                ShapeKind::Rectangle => "矩形",
+                ShapeKind::Ellipse => "圆形",
+                ShapeKind::Diamond => "菱形",
+            },
             "WASD 调整对角点 · Enter 保存 · Q 取消 · Ctrl+Q 退出",
         ),
         Mode::Moving { .. } => (
@@ -199,14 +174,14 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
     if area.width >= 20 && area.height >= 8 {
         let width = area.width.saturating_sub(4).min(66);
         f.render_widget(
-            Paragraph::new(format!(" Tdraw   │   ↖ 选择    ▣ 矩形 Ctrl+D   │   {mode}"))
+            Paragraph::new(" Tdraw | 终端图表绘制工具")
                 .block(panel())
                 .style(Style::default().fg(PURPLE).bg(SOFT)),
             Rect::new((area.width - width) / 2, 0, width, 3),
         );
         f.render_widget(
             Paragraph::new(format!(
-                " {help}\n {}  │  {} 区块  │  {},{}{}",
+                " {help}\n {mode} · {}  │  {} 方块  │  {},{}{}",
                 app.message,
                 app.rectangles.len(),
                 app.cursor.0,
@@ -220,8 +195,9 @@ pub(crate) fn ui(f: &mut Frame, app: &App) {
     let (x, y) = (app.cursor.0 as u16, app.cursor.1 as u16);
     if let Mode::Editing { index, .. } = app.mode {
         let r = &app.rectangles[index];
-        let tx = r.x.floor() + 1.0 + r.text.split('\n').next_back().unwrap_or("").width() as f64;
-        let ty = r.y.floor() + r.text.split('\n').count() as f64;
+        let (left, top, _, _) = r.text_region();
+        let tx = left + r.text.split('\n').next_back().unwrap_or("").width() as f64;
+        let ty = top + r.text.split('\n').count() as f64 - 1.0;
         if tx < area.width as f64 && ty < area.height as f64 {
             f.set_cursor_position((tx as u16, ty as u16));
         }

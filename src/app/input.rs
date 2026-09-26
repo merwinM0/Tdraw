@@ -1,5 +1,5 @@
 use super::{App, Mode};
-use crate::connection::Connection;
+use crate::{connection::Connection, model::ShapeKind};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -19,9 +19,14 @@ impl App {
                         self.quit = true;
                     }
                 }
-                KeyCode::Char('d') if matches!(self.mode, Mode::Normal) => {
+                KeyCode::Char(c @ ('d' | 'w' | 'a')) if matches!(self.mode, Mode::Normal) => {
                     self.mode = Mode::Drawing {
                         anchor: self.cursor,
+                        shape: match c {
+                            'w' => ShapeKind::Ellipse,
+                            'a' => ShapeKind::Diamond,
+                            _ => ShapeKind::Rectangle,
+                        },
                     };
                 }
                 KeyCode::Char('s') if matches!(self.mode, Mode::Normal) => {
@@ -165,7 +170,7 @@ impl App {
                 self.commit();
             }
             (KeyCode::Enter, Mode::SelectedConnection { .. }) => self.mode = Mode::Normal,
-            (KeyCode::Enter, Mode::Drawing { anchor }) => {
+            (KeyCode::Enter, Mode::Drawing { anchor, .. }) => {
                 self.rectangles.push(self.preview(anchor));
                 self.commit();
             }

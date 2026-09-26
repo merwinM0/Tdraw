@@ -6,7 +6,8 @@ fn drawing_preview_and_persistence() {
     draw(&mut a);
     assert_eq!(
         a.rectangles[0],
-        Rectangle {
+        Shape {
+            shape: ShapeKind::Rectangle,
             x: 39.0,
             y: 11.0,
             width: 2.0,
@@ -82,7 +83,8 @@ fn quit_cancels_unconfirmed_changes() {
 #[test]
 fn render_small_and_clipped_canvases() {
     let mut a = app();
-    a.rectangles.push(Rectangle {
+    a.rectangles.push(Shape {
+        shape: ShapeKind::Rectangle,
         x: 0.0,
         y: 0.0,
         z: 0.0,
@@ -146,7 +148,7 @@ fn text_cancel_backspace_and_quit() {
 }
 #[test]
 fn legacy_json_defaults_to_empty_text() {
-    let r: Rectangle = serde_json::from_str(r#"{"x":0,"y":0,"z":0,"width":3,"height":3}"#).unwrap();
+    let r: Shape = serde_json::from_str(r#"{"x":0,"y":0,"z":0,"width":3,"height":3}"#).unwrap();
     assert!(r.text.is_empty());
 }
 #[test]
